@@ -534,12 +534,16 @@ class VendorAParser(BaseParser):
                         amp_value = float(val)
                         # 接受合理的扩增值范围（可以是负数，因为可能是ΔRn值）
                         if -100 < amp_value < 10000:
-                            data_rows.append({
+                            row_data = {
                                 'Cycle': cycle_num,
                                 'Well': well_name,
                                 'Channel': channel_name if channel_name else 'Unknown',
                                 'Amplification': amp_value
-                            })
+                            }
+                            # 只在第一行添加CT值
+                            if cycle_num == 1 and ct_value is not None:
+                                row_data['Ct'] = ct_value
+                            data_rows.append(row_data)
                             cycle_num += 1
                             max_cycles = max(max_cycles, cycle_num)
                     except:

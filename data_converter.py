@@ -78,6 +78,13 @@ class VendorAConverter(DataConverter):
                                 values.extend([0.0] * (len(well.cycles) - len(values)))
                         
                         well.channels[channel_name] = values
+                        
+                        # 提取CT值（如果DataFrame中有Ct列）
+                        if 'Ct' in group_df.columns:
+                            ct_values = group_df['Ct'].dropna()
+                            if len(ct_values) > 0:
+                                # 使用第一个非空CT值
+                                well.ct_values[channel_name] = float(ct_values.iloc[0])
         
         # 处理原始数据
         if 'raw_data' in parsed_data:

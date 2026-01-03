@@ -11,7 +11,7 @@ from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QTableWidgetItem, QLabel, QMessageBox, QTabWidget,
                              QTextEdit, QSplitter, QGroupBox, QComboBox, QCheckBox, QRadioButton, QButtonGroup)
 from PyQt5.QtCore import Qt, QThread, pyqtSignal
-from PyQt5.QtGui import QFont, QIcon
+from PyQt5.QtGui import QFont, QIcon, QColor
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
@@ -30,6 +30,13 @@ from plate_selector import PlateSelector
 from data_model import PCRDataModel
 from data_converter import ConverterFactory
 
+# 导入项目数据
+try:
+    from projects_data import projects_data, channel_names as project_channel_names
+except ImportError:
+    projects_data = {}
+    project_channel_names = ['FAM', 'VIC', 'CY5', 'ROX']
+
 
 class PCRAnalyzerApp(QMainWindow):
     """PCR分析软件主窗口"""
@@ -42,6 +49,8 @@ class PCRAnalyzerApp(QMainWindow):
         self.well_data_map = {}  # 孔位数据映射 {well_name: data}
         self.selected_channels = []  # 选中的通道
         self.curve_type = 'amplification'  # 当前曲线类型
+        self.selected_project = None  # 选中的项目名称
+        self.judgment_results = []  # 研判结果列表
         self.init_ui()
         
     def init_ui(self):
@@ -102,7 +111,13 @@ class PCRAnalyzerApp(QMainWindow):
     def create_main_tab(self):
         """创建主分析标签页（包含孔板选择器和扩增曲线）"""
         widget = QWidget()
-        main_layout = QHBoxLayout(widget)
+        # 使用垂直布局：第一行是孔板|曲线|项目，第二行是结果
+        main_layout = QVBoxLayout(widget)
+        main_layout.setContentsMargins(5, 5, 5, 5)
+        main_layout.setSpacing(5)
+        
+        # 第一行：孔板 | 曲线 | 项目（使用水平分割器）
+        top_splitter = QSplitter(Qt.Horizontal)
         
         # 左侧：孔板选择器和控制面板
         left_panel = QWidget()
@@ -137,7 +152,7 @@ class PCRAnalyzerApp(QMainWindow):
         
         left_layout.addStretch()
         
-        # 右侧：扩增曲线显示
+        # 中间：扩增曲线显示
         right_panel = QWidget()
         right_layout = QVBoxLayout(right_panel)
         
@@ -173,20 +188,67 @@ class PCRAnalyzerApp(QMainWindow):
         self.canvas = FigureCanvas(self.figure)
         right_layout.addWidget(self.canvas)
         
-        # 信息显示
+        # 信息显示（已隐藏）
         self.curve_info = QTextEdit()
         self.curve_info.setReadOnly(True)
         self.curve_info.setMaximumHeight(100)
-        right_layout.addWidget(self.curve_info)
+        self.curve_info.setVisible(False)  # 隐藏信息显示区域
+        # right_layout.addWidget(self.curve_info)  # 不添加到布局中
         
-        # 使用分割器
-        splitter = QSplitter(Qt.Horizontal)
-        splitter.addWidget(left_panel)
-        splitter.addWidget(right_panel)
-        splitter.setStretchFactor(0, 1)
-        splitter.setStretchFactor(1, 2)
+        # 右侧：项目选择列
+        project_panel = QWidget()
+        project_layout = QVBoxLayout(project_panel)
+        project_layout.setContentsMargins(5, 5, 5, 5)
         
-        main_layout.addWidget(splitter)
+        # 项目选择组
+        project_group = QGroupBox("项目选择")
+        project_group_layout = QVBoxLayout(project_group)
+        
+        # 项目复选框列表
+        self.project_checkboxes = {}
+        if projects_data:
+            for project_name in sorted(projects_data.keys()):
+                checkbox = QCheckBox(project_name)
+                # 创建包装函数来传递项目名称，避免lambda闭包问题
+                def make_handler(name):
+                    def handler(checked):
+                        self.on_project_changed(name)
+                    return handler
+                checkbox.stateChanged.connect(make_handler(project_name))
+                self.project_checkboxes[project_name] = checkbox
+                project_group_layout.addWidget(checkbox)
+        else:
+            no_project_label = QLabel("未找到项目数据")
+            project_group_layout.addWidget(no_project_label)
+        
+        project_group_layout.addStretch()
+        project_layout.addWidget(project_group)
+        project_layout.addStretch()
+        
+        # 将三个面板添加到水平分割器
+        top_splitter.addWidget(left_panel)
+        top_splitter.addWidget(right_panel)
+        top_splitter.addWidget(project_panel)
+        top_splitter.setStretchFactor(0, 1)
+        top_splitter.setStretchFactor(1, 2)
+        top_splitter.setStretchFactor(2, 1)
+        
+        # 添加到主布局（第一行）
+        main_layout.addWidget(top_splitter, 2)  # 占据2倍空间
+        
+        # 第二行：研判结果显示区域（单独一行，占据整个宽度）
+        judgment_group = QGroupBox("研判结果")
+        judgment_layout = QVBoxLayout(judgment_group)
+        
+        # 结果显示表格（列数和列标题会根据选中的项目动态设置）
+        self.judgment_table = QTableWidget()
+        # 初始列数会在update_judgment_results中动态设置
+        # 设置最小高度，让结果表格有足够的显示空间
+        self.judgment_table.setMinimumHeight(250)
+        judgment_layout.addWidget(self.judgment_table)
+        
+        # 添加到主布局（第二行）
+        main_layout.addWidget(judgment_group, 1)  # 占据1倍空间
         
         return widget
     
@@ -229,6 +291,10 @@ class PCRAnalyzerApp(QMainWindow):
             self.update_curves()
         else:
             self.update_curves()
+        
+        # 更新研判结果（根据选中的孔位）
+        if self.selected_project:
+            self.update_judgment_results()
     
     def on_channel_changed(self):
         """通道选择改变"""
@@ -242,6 +308,96 @@ class PCRAnalyzerApp(QMainWindow):
             self.curve_type = 'raw'
         self.update_curves()
     
+    def on_project_changed(self, sender_name=None):
+        """项目选择改变"""
+        # 如果传入了发送者名称，说明是特定复选框触发的
+        if sender_name:
+            sender_cb = self.project_checkboxes.get(sender_name)
+            if sender_cb and sender_cb.isChecked():
+                # 如果当前复选框被选中，取消其他所有复选框的选中状态
+                for name, cb in self.project_checkboxes.items():
+                    if name != sender_name and cb.isChecked():
+                        cb.blockSignals(True)
+                        cb.setChecked(False)
+                        cb.blockSignals(False)
+                self.selected_project = sender_name
+            else:
+                # 如果当前复选框被取消选中，清空选择
+                self.selected_project = None
+        else:
+            # 兼容旧逻辑：获取选中的项目（只允许选择一个）
+            selected_projects = [name for name, cb in self.project_checkboxes.items() if cb.isChecked()]
+            
+            if len(selected_projects) > 1:
+                # 如果选中了多个，只保留最后一个
+                for name in selected_projects[:-1]:
+                    self.project_checkboxes[name].blockSignals(True)
+                    self.project_checkboxes[name].setChecked(False)
+                    self.project_checkboxes[name].blockSignals(False)
+                selected_projects = selected_projects[-1:]
+            
+            if selected_projects:
+                self.selected_project = selected_projects[0]
+            else:
+                self.selected_project = None
+        
+        # 更新研判结果
+        self.update_judgment_results()
+    
+    def clear_all_state(self):
+        """清理所有状态（打开新文件时调用）"""
+        # 清除孔板选择和数据
+        if hasattr(self, 'plate_selector'):
+            self.plate_selector.clear_selection()
+            # 清除所有孔位的数据和显示
+            if hasattr(self.plate_selector, 'well_data'):
+                self.plate_selector.well_data.clear()
+            # 重置所有按钮的文本和样式
+            if hasattr(self.plate_selector, 'well_buttons'):
+                default_style = self.plate_selector.get_default_button_style()
+                for well_name, btn in self.plate_selector.well_buttons.items():
+                    btn.setText("")
+                    btn.setToolTip(f"孔位 {well_name}")
+                    btn.setStyleSheet(default_style)
+        
+        # 清除项目选择
+        if hasattr(self, 'project_checkboxes'):
+            for checkbox in self.project_checkboxes.values():
+                checkbox.blockSignals(True)
+                checkbox.setChecked(False)
+                checkbox.blockSignals(False)
+        self.selected_project = None
+        
+        # 清空研判结果表格
+        if hasattr(self, 'judgment_table'):
+            self.judgment_table.setRowCount(0)
+            self.judgment_table.setColumnCount(0)
+        
+        # 清空数据模型
+        self.parsed_data = None
+        self.data_model = None
+        self.well_data_map = {}
+        
+        # 清空曲线显示
+        if hasattr(self, 'figure'):
+            self.figure.clear()
+            ax = self.figure.add_subplot(111)
+            ax.text(0.5, 0.5, '请先打开Excel文件', 
+                   ha='center', va='center', fontsize=14)
+            ax.set_xticks([])
+            ax.set_yticks([])
+            if hasattr(self, 'canvas'):
+                self.canvas.draw()
+        
+        # 清空信息显示
+        if hasattr(self, 'curve_info'):
+            self.curve_info.clear()
+        if hasattr(self, 'info_text'):
+            self.info_text.clear()
+        if hasattr(self, 'data_table'):
+            self.data_table.setRowCount(0)
+            self.data_table.setColumnCount(0)
+    
     def open_file(self):
         """打开Excel文件"""
         file_path, _ = QFileDialog.getOpenFileName(
@@ -249,6 +405,9 @@ class PCRAnalyzerApp(QMainWindow):
         )
         
         if file_path:
+            # 清理之前的状态
+            self.clear_all_state()
+            
             self.current_file = file_path
             self.file_label.setText(f'文件: {os.path.basename(file_path)}')
             self.statusBar().showMessage('正在解析文件...')
@@ -293,6 +452,9 @@ class PCRAnalyzerApp(QMainWindow):
                 
                 # 立即更新曲线显示
                 self.update_curves()
+                
+                # 更新研判结果
+                self.update_judgment_results()
                 
                 self.statusBar().showMessage('文件解析完成')
                 self.export_btn.setEnabled(True)
@@ -460,8 +622,8 @@ class PCRAnalyzerApp(QMainWindow):
             
             self.canvas.draw()
             
-            # 更新信息显示
-            self.update_curve_info(selected_wells, selected_channels)
+            # 更新信息显示（已禁用）
+            # self.update_curve_info(selected_wells, selected_channels)
         except Exception as e:
             # 显示错误信息
             self.figure.clear()
@@ -513,6 +675,132 @@ class PCRAnalyzerApp(QMainWindow):
                 QMessageBox.information(self, '成功', '结果已导出')
             except Exception as e:
                 QMessageBox.critical(self, '错误', f'导出失败:\n{str(e)}')
+    
+    def update_judgment_results(self):
+        """更新研判结果显示"""
+        if not self.data_model or not self.selected_project:
+            # 清空表格
+            self.judgment_table.setRowCount(0)
+            return
+        
+        # 获取项目配置
+        if self.selected_project not in projects_data:
+            self.judgment_table.setRowCount(0)
+            return
+        
+        project_config = projects_data[self.selected_project]
+        
+        # 筛选出有target的通道
+        valid_channels = []
+        for ch_name in project_channel_names:
+            if ch_name in project_config:
+                ch_config = project_config[ch_name]
+                target = ch_config.get('target', '')
+                # 只包含有target且target不为空的通道
+                if target and target.strip() and target.strip() != '\\' and target.strip() != '/':
+                    valid_channels.append(ch_name)
+        
+        # 如果没有有效通道，清空表格
+        if not valid_channels:
+            self.judgment_table.setRowCount(0)
+            self.judgment_table.setColumnCount(0)
+            return
+        
+        # 设置表格列数和列标题
+        column_count = 2 + len(valid_channels) + 1  # Well + 项目名 + 通道列 + 判读结果
+        self.judgment_table.setColumnCount(column_count)
+        headers = ['Well', '项目名'] + valid_channels + ['判读结果']
+        self.judgment_table.setHorizontalHeaderLabels(headers)
+        
+        # 获取在孔板中选择的孔位
+        selected_wells = self.plate_selector.get_selected_wells()
+        
+        # 如果没有选中任何孔位，显示所有孔位
+        if not selected_wells:
+            all_wells = list(self.data_model.wells.keys())
+        else:
+            # 只显示选中的孔位
+            all_wells = selected_wells
+        
+        if not all_wells:
+            self.judgment_table.setRowCount(0)
+            return
+        
+        # 准备结果数据
+        results = []
+        
+        for well_name in sorted(all_wells):
+            well = self.data_model.get_well(well_name)
+            if not well:
+                continue
+            
+            # 获取各通道的CT值（只处理有效通道）
+            ct_values = {}
+            positive_targets = []
+            
+            for ch_name in valid_channels:
+                # 获取CT值
+                ct_value = well.ct_values.get(ch_name, None)
+                ct_values[ch_name] = ct_value
+                
+                # 判断是否阳性
+                if ch_name in project_config:
+                    ch_config = project_config[ch_name]
+                    threshold = ch_config.get('threshold', None)
+                    target = ch_config.get('target', '')
+                    
+                    if ct_value is not None and threshold is not None:
+                        # CT值小于阈值则为阳性（CT值越小，扩增越早，越可能是阳性）
+                        if ct_value < threshold:
+                            positive_targets.append(target if target else ch_name)
+            
+            # 所有孔位都添加到结果中，即使没有CT值
+            results.append({
+                'well': well_name,
+                'project': self.selected_project,
+                'ct_values': ct_values,
+                'positive_targets': positive_targets
+            })
+        
+        # 更新表格
+        self.judgment_table.setRowCount(len(results))
+        
+        for row_idx, result in enumerate(results):
+            # Well
+            self.judgment_table.setItem(row_idx, 0, QTableWidgetItem(result['well']))
+            
+            # 项目名
+            self.judgment_table.setItem(row_idx, 1, QTableWidgetItem(result['project']))
+            
+            # 各通道CT值（只显示有效通道）
+            for col_idx, ch_name in enumerate(valid_channels, 2):
+                ct_value = result['ct_values'].get(ch_name)
+                if ct_value is not None:
+                    item = QTableWidgetItem(f"{ct_value:.2f}")
+                    # 根据是否阳性设置颜色
+                    if ch_name in project_config:
+                        ch_config = project_config[ch_name]
+                        threshold = ch_config.get('threshold', None)
+                        if threshold is not None and ct_value < threshold:
+                            item.setBackground(QColor(255, 200, 200))  # 浅红色 - 阳性
+                        else:
+                            item.setBackground(QColor(200, 255, 200))  # 浅绿色 - 阴性
+                    self.judgment_table.setItem(row_idx, col_idx, item)
+                else:
+                    self.judgment_table.setItem(row_idx, col_idx, QTableWidgetItem("N/A"))
+            
+            # 判读结果（阳性targets）
+            result_col_idx = 2 + len(valid_channels)  # 判读结果列索引
+            if result['positive_targets']:
+                result_text = ", ".join(result['positive_targets'])
+                item = QTableWidgetItem(result_text)
+                item.setBackground(QColor(255, 200, 200))  # 浅红色
+                self.judgment_table.setItem(row_idx, result_col_idx, item)
+            else:
+                self.judgment_table.setItem(row_idx, result_col_idx, QTableWidgetItem("阴性"))
+        
+        # 调整列宽
+        self.judgment_table.resizeColumnsToContents()
 
 
 def main():
