@@ -738,9 +738,17 @@ class PCRAnalyzerApp(QMainWindow):
             ct_values = {}
             positive_targets = []
             
+            def get_ct_value(channel_name):
+                """获取通道的CT值，VIC和HEX等价，如果VIC没有数据则取HEX的数据"""
+                ct_value = well.ct_values.get(channel_name, None)
+                # 如果VIC没有数据，尝试从HEX获取
+                if channel_name == 'VIC' and ct_value is None:
+                    ct_value = well.ct_values.get('HEX', None)
+                return ct_value
+            
             for ch_name in valid_channels:
-                # 获取CT值
-                ct_value = well.ct_values.get(ch_name, None)
+                # 获取CT值（VIC和HEX等价）
+                ct_value = get_ct_value(ch_name)
                 ct_values[ch_name] = ct_value
                 
                 # 判断是否阳性
@@ -775,6 +783,13 @@ class PCRAnalyzerApp(QMainWindow):
             # 各通道CT值（只显示有效通道）
             for col_idx, ch_name in enumerate(valid_channels, 2):
                 ct_value = result['ct_values'].get(ch_name)
+                # 如果VIC没有数据，尝试从HEX获取（在显示时也需要处理）
+                if ct_value is None and ch_name == 'VIC':
+                    well = self.data_model.get_well(result['well'])
+                    if well:
+                        ct_value = well.ct_values.get('HEX', None)
+                        # 更新结果中的CT值，以便后续判断使用
+                        result['ct_values'][ch_name] = ct_value
                 if ct_value is not None:
                     item = QTableWidgetItem(f"{ct_value:.2f}")
                     # 根据是否阳性设置颜色

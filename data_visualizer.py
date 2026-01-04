@@ -95,8 +95,8 @@ class DataVisualizer:
                     well_df = well_df.sort_values('Cycle')
                     
                     ax.plot(well_df['Cycle'], well_df[y_column],
-                           marker='o', color=color,
-                           linewidth=2, markersize=3, alpha=0.7)
+                           color=color,
+                           linewidth=2, alpha=0.7)
                     plotted_count += 1
             else:
                 # 只显示一个孔位或所有数据合并
@@ -118,8 +118,8 @@ class DataVisualizer:
                 
                 if not well_df.empty:
                     ax.plot(well_df['Cycle'], well_df[y_column],
-                           marker='o', color=color,
-                           linewidth=2, markersize=4)
+                           color=color,
+                           linewidth=2)
                     plotted_count += 1
         
         ax.set_xlabel('循环数 (Cycle)', fontsize=12)
@@ -192,9 +192,9 @@ class DataVisualizer:
                 valid_mask = ~np.isnan(values)
                 if np.any(valid_mask):
                     ax.plot(cycles[valid_mask], values[valid_mask], 
-                           marker='o', label=channel, 
+                           label=channel, 
                            color=colors[i % len(colors)], 
-                           linewidth=2, markersize=4)
+                           linewidth=2)
         
         ax.set_xlabel('循环数 (Cycle)', fontsize=12)
         ax.set_ylabel('荧光值 / Ct值', fontsize=12)
