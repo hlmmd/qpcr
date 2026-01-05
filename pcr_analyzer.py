@@ -4,6 +4,7 @@ PCR结果分析软件
 """
 import sys
 import os
+import shutil
 from pathlib import Path
 from typing import List
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
@@ -188,42 +189,31 @@ def load_projects_data():
                 loaded_projects = load_projects_from_excel(str(file_path))
                 if loaded_projects:
                     print(f"从 {file_path.name} 加载了 {len(loaded_projects)} 个项目")
-                    # 合并Excel数据和默认数据：Excel数据优先，但缺失的字段使用默认值
+                    # 直接使用Excel数据，完全替换默认数据
+                    # 如果Excel中某个项目的通道配置不完整，从默认数据中补充
+                    import copy
                     merged_projects = {}
-                    # 先复制默认数据
-                    for project_name, project_config in default_projects.items():
-                        merged_projects[project_name] = {}
-                        merged_projects[project_name]['project_id'] = project_config.get('project_id', '')
-                        for ch in default_channels:
-                            if ch in project_config:
-                                merged_projects[project_name][ch] = project_config[ch].copy()
-                            else:
-                                merged_projects[project_name][ch] = {}
-                    
-                    # 然后用Excel数据更新（只更新存在的字段，不覆盖整个字典）
                     for project_name, excel_config in loaded_projects.items():
-                        if project_name not in merged_projects:
-                            # 如果Excel中有新项目，直接添加
-                            merged_projects[project_name] = excel_config
-                        else:
-                            # 合并项目配置
-                            if 'project_id' in excel_config and excel_config['project_id']:
-                                merged_projects[project_name]['project_id'] = excel_config['project_id']
-                            
-                            # 合并通道配置
+                        # 深拷贝Excel配置
+                        merged_projects[project_name] = copy.deepcopy(excel_config)
+                        
+                        # 如果Excel中缺少某些通道的配置，从默认数据中补充
+                        if project_name in default_projects:
+                            default_config = default_projects[project_name]
                             for ch in default_channels:
-                                if ch in excel_config and excel_config[ch]:
-                                    # Excel中有该通道的配置，合并字段
-                                    if ch not in merged_projects[project_name]:
+                                # 如果Excel中没有该通道的配置，使用默认值
+                                if ch not in merged_projects[project_name] or not merged_projects[project_name][ch]:
+                                    if ch in default_config:
+                                        merged_projects[project_name][ch] = copy.deepcopy(default_config[ch])
+                                    else:
                                         merged_projects[project_name][ch] = {}
-                                    # 更新target（如果Excel中有）
-                                    if 'target' in excel_config[ch] and excel_config[ch]['target']:
-                                        merged_projects[project_name][ch]['target'] = excel_config[ch]['target']
-                                    # 更新threshold（如果Excel中有）
-                                    if 'threshold' in excel_config[ch]:
-                                        merged_projects[project_name][ch]['threshold'] = excel_config[ch]['threshold']
-                                    if 'threshold2' in excel_config[ch]:
-                                        merged_projects[project_name][ch]['threshold2'] = excel_config[ch]['threshold2']
+                                # 如果Excel中有该通道但缺少某些字段，从默认值补充
+                                elif ch in default_config:
+                                    default_ch_config = default_config[ch]
+                                    if 'target' not in merged_projects[project_name][ch] and 'target' in default_ch_config:
+                                        merged_projects[project_name][ch]['target'] = default_ch_config['target']
+                                    if 'threshold' not in merged_projects[project_name][ch] and 'threshold' in default_ch_config:
+                                        merged_projects[project_name][ch]['threshold'] = default_ch_config['threshold']
                     
                     return merged_projects, default_channels
             except Exception as e:
@@ -418,9 +408,7 @@ class PCRAnalyzerApp(QMainWindow):
         self.current_page = 1  # 当前页码
         self.items_per_page = 20  # 每页显示的项目数
         
-        self.refresh_project_list()
-        
-        # 分页控件（放在项目列表下方）
+        # 分页控件（放在项目列表下方，先创建以便refresh_project_list可以使用）
         pagination_layout = QHBoxLayout()
         pagination_layout.addStretch()
         
@@ -443,6 +431,9 @@ class PCRAnalyzerApp(QMainWindow):
         
         pagination_layout.addStretch()
         project_group_layout.addLayout(pagination_layout)
+        
+        # 在分页控件创建后再刷新项目列表
+        self.refresh_project_list()
         
         project_group_layout.addStretch()
         project_layout.addWidget(project_group)
@@ -924,51 +915,39 @@ class PCRAnalyzerApp(QMainWindow):
             try:
                 loaded_projects = load_projects_from_excel(file_path)
                 if loaded_projects:
-                    # 合并Excel数据和现有数据（Excel数据优先，但缺失的字段使用现有值）
-                    # 先获取默认数据
+                    # 直接使用Excel数据，完全替换现有数据
+                    # 如果Excel中某个项目的通道配置不完整，从默认数据中补充
                     try:
                         from projects_data import projects_data as default_projects_data
                     except ImportError:
                         default_projects_data = {}
                     
-                    # 合并数据
+                    # 直接使用Excel数据作为基础
                     merged_projects = {}
-                    # 先复制现有数据（如果有）
-                    for project_name, project_config in self.projects_data.items():
-                        merged_projects[project_name] = {}
-                        merged_projects[project_name]['project_id'] = project_config.get('project_id', '')
-                        for ch in self.project_channel_names:
-                            if ch in project_config:
-                                merged_projects[project_name][ch] = project_config[ch].copy()
-                            else:
-                                merged_projects[project_name][ch] = {}
-                    
-                    # 然后用Excel数据更新
                     for project_name, excel_config in loaded_projects.items():
-                        if project_name not in merged_projects:
-                            # 如果Excel中有新项目，直接添加
-                            merged_projects[project_name] = excel_config
-                        else:
-                            # 合并项目配置
-                            if 'project_id' in excel_config and excel_config['project_id']:
-                                merged_projects[project_name]['project_id'] = excel_config['project_id']
-                            
-                            # 合并通道配置
+                        # 深拷贝Excel配置
+                        import copy
+                        merged_projects[project_name] = copy.deepcopy(excel_config)
+                        
+                        # 如果Excel中缺少某些通道的配置，从默认数据中补充
+                        if project_name in default_projects_data:
+                            default_config = default_projects_data[project_name]
                             for ch in self.project_channel_names:
-                                if ch in excel_config and excel_config[ch]:
-                                    # Excel中有该通道的配置，合并字段
-                                    if ch not in merged_projects[project_name]:
+                                # 如果Excel中没有该通道的配置，使用默认值
+                                if ch not in merged_projects[project_name] or not merged_projects[project_name][ch]:
+                                    if ch in default_config:
+                                        merged_projects[project_name][ch] = copy.deepcopy(default_config[ch])
+                                    else:
                                         merged_projects[project_name][ch] = {}
-                                    # 更新target（如果Excel中有且不为空）
-                                    if 'target' in excel_config[ch] and excel_config[ch].get('target'):
-                                        merged_projects[project_name][ch]['target'] = excel_config[ch]['target']
-                                    # 更新threshold（如果Excel中有）
-                                    if 'threshold' in excel_config[ch]:
-                                        merged_projects[project_name][ch]['threshold'] = excel_config[ch]['threshold']
-                                    if 'threshold2' in excel_config[ch]:
-                                        merged_projects[project_name][ch]['threshold2'] = excel_config[ch]['threshold2']
+                                # 如果Excel中有该通道但缺少某些字段，从默认值补充
+                                elif ch in default_config:
+                                    default_ch_config = default_config[ch]
+                                    if 'target' not in merged_projects[project_name][ch] and 'target' in default_ch_config:
+                                        merged_projects[project_name][ch]['target'] = default_ch_config['target']
+                                    if 'threshold' not in merged_projects[project_name][ch] and 'threshold' in default_ch_config:
+                                        merged_projects[project_name][ch]['threshold'] = default_ch_config['threshold']
                     
-                    # 更新项目数据
+                    # 更新项目数据（完全使用Excel数据）
                     self.projects_data = merged_projects
                     # 刷新项目列表
                     self.refresh_project_list()
@@ -976,7 +955,27 @@ class PCRAnalyzerApp(QMainWindow):
                     self.selected_projects = []
                     # 更新结果判读
                     self.update_judgment_results()
-                    QMessageBox.information(self, '成功', f'成功导入 {len(loaded_projects)} 个项目')
+                    
+                    # 将导入的文件保存到当前文件夹下，作为默认项目模板
+                    try:
+                        base_dir = Path(__file__).parent
+                        target_file = base_dir / 'projects.xls'
+                        
+                        # 如果源文件是.xlsx，保存为.xlsx；如果是.xls，保存为.xls
+                        source_ext = Path(file_path).suffix.lower()
+                        if source_ext == '.xlsx':
+                            target_file = base_dir / 'projects.xlsx'
+                        
+                        # 复制文件
+                        shutil.copy2(file_path, target_file)
+                        QMessageBox.information(self, '成功', 
+                            f'成功导入 {len(loaded_projects)} 个项目\n'
+                            f'已保存为默认项目模板: {target_file.name}')
+                    except Exception as save_error:
+                        # 如果保存失败，仍然显示导入成功，但提示保存失败
+                        QMessageBox.warning(self, '导入成功但保存失败', 
+                            f'成功导入 {len(loaded_projects)} 个项目\n'
+                            f'但保存为默认模板失败: {str(save_error)}')
                 else:
                     QMessageBox.warning(self, '警告', '未能从文件中读取到项目数据')
             except Exception as e:
