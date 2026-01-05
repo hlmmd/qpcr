@@ -163,6 +163,16 @@ def load_projects_from_excel(file_path):
         return {}
 
 
+def get_base_directory():
+    """获取程序所在目录（支持打包成exe）"""
+    if getattr(sys, 'frozen', False):
+        # 如果是打包后的exe，使用exe所在目录
+        return Path(sys.executable).parent
+    else:
+        # 如果是脚本运行，使用脚本所在目录
+        return Path(__file__).parent
+
+
 def load_projects_data():
     """加载项目数据，优先从目录下的projects.xls或projects.xlsx读取"""
     # 默认项目数据
@@ -177,7 +187,7 @@ def load_projects_data():
         pass
     
     # 尝试从目录下的文件读取
-    base_dir = Path(__file__).parent
+    base_dir = get_base_directory()
     project_files = [
         base_dir / 'projects.xlsx',
         base_dir / 'projects.xls',
@@ -958,7 +968,7 @@ class PCRAnalyzerApp(QMainWindow):
                     
                     # 将导入的文件保存到当前文件夹下，作为默认项目模板
                     try:
-                        base_dir = Path(__file__).parent
+                        base_dir = get_base_directory()
                         target_file = base_dir / 'projects.xls'
                         
                         # 如果源文件是.xlsx，保存为.xlsx；如果是.xls，保存为.xls
