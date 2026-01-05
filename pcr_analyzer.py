@@ -9,7 +9,8 @@ from typing import List
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
                              QHBoxLayout, QPushButton, QFileDialog, QTableWidget, 
                              QTableWidgetItem, QLabel, QMessageBox, QTabWidget,
-                             QTextEdit, QSplitter, QGroupBox, QComboBox, QCheckBox, QRadioButton, QButtonGroup)
+                             QTextEdit, QSplitter, QGroupBox, QComboBox, QCheckBox, QRadioButton, QButtonGroup, QListWidget, QLineEdit, QStyle)
+from PyQt5.QtGui import QFontMetrics
 from PyQt5.QtCore import Qt, QThread, pyqtSignal
 from PyQt5.QtGui import QFont, QIcon, QColor
 import pandas as pd
@@ -38,6 +39,200 @@ except ImportError:
     project_channel_names = ['FAM', 'VIC', 'CY5', 'ROX']
 
 
+def load_projects_from_excel(file_path):
+    """
+    从Excel文件加载项目数据
+    支持两种格式：
+    1. 每个项目一行，列格式：项目名称, project_id, FAM_target, FAM_threshold, VIC_target, VIC_threshold, ...
+    2. 每个项目多行，每行一个通道
+    """
+    try:
+        # 根据文件扩展名选择引擎
+        file_ext = Path(file_path).suffix.lower()
+        if file_ext == '.xls':
+            # .xls 文件使用 xlrd 引擎
+            try:
+                df = pd.read_excel(file_path, sheet_name=0, header=None, engine='xlrd')
+            except ImportError:
+                raise ImportError("读取 .xls 文件需要安装 xlrd>=2.0.1，请运行: pip install xlrd>=2.0.1")
+        else:
+            # .xlsx 文件使用 openpyxl 引擎
+            df = pd.read_excel(file_path, sheet_name=0, header=None, engine='openpyxl')
+        
+        projects = {}
+        channels = ['FAM', 'VIC', 'CY5', 'ROX']
+        
+        # 查找表头行
+        header_row = None
+        for idx, row in df.iterrows():
+            row_str = ' '.join([str(x).upper() for x in row if pd.notna(x)])
+            if '项目' in row_str or 'PROJECT' in row_str or 'FAM' in row_str:
+                header_row = idx
+                break
+        
+        if header_row is None:
+            # 如果没有找到表头，假设第一行是表头
+            header_row = 0
+        
+        # 读取表头，确定列索引
+        header = df.iloc[header_row].values
+        
+        # 查找各列的索引
+        col_map = {}
+        for i, val in enumerate(header):
+            if pd.notna(val):
+                val_str = str(val).upper()
+                if '项目' in val_str or 'PROJECT' in val_str or 'NAME' in val_str:
+                    col_map['project_name'] = i
+                elif 'ID' in val_str and 'PROJECT' in val_str:
+                    col_map['project_id'] = i
+                else:
+                    for ch in channels:
+                        if ch in val_str:
+                            if 'TARGET' in val_str or '目标' in val_str or '靶标' in val_str:
+                                col_map[f'{ch}_target'] = i
+                            elif 'THRESHOLD' in val_str or '阈值' in val_str or 'TH' in val_str:
+                                col_map[f'{ch}_threshold'] = i
+        
+        # 如果找不到列映射，尝试按位置推断（假设固定格式）
+        if not col_map:
+            # 假设格式：项目名称, project_id, FAM_target, FAM_threshold, VIC_target, VIC_threshold, ...
+            col_map = {'project_name': 0, 'project_id': 1}
+            for i, ch in enumerate(channels):
+                col_map[f'{ch}_target'] = 2 + i * 2
+                col_map[f'{ch}_threshold'] = 3 + i * 2
+        
+        # 读取数据行
+        for idx in range(header_row + 1, len(df)):
+            row = df.iloc[idx]
+            
+            # 获取项目名称
+            if 'project_name' not in col_map:
+                continue
+            project_name_col = col_map['project_name']
+            if project_name_col >= len(row) or pd.isna(row.iloc[project_name_col]):
+                continue
+            
+            project_name = str(row.iloc[project_name_col]).strip()
+            if not project_name or project_name == 'nan':
+                continue
+            
+            # 获取project_id
+            project_id = ''
+            if 'project_id' in col_map and col_map['project_id'] < len(row):
+                project_id_val = row.iloc[col_map['project_id']]
+                if pd.notna(project_id_val):
+                    project_id = str(project_id_val).strip()
+            
+            # 初始化项目数据
+            if project_name not in projects:
+                projects[project_name] = {
+                    'project_id': project_id,
+                }
+            
+            # 读取各通道数据
+            for ch in channels:
+                if ch not in projects[project_name]:
+                    projects[project_name][ch] = {}
+                
+                # 读取target
+                target_key = f'{ch}_target'
+                if target_key in col_map and col_map[target_key] < len(row):
+                    target_val = row.iloc[col_map[target_key]]
+                    if pd.notna(target_val):
+                        target_str = str(target_val).strip()
+                        if target_str and target_str != 'nan':
+                            projects[project_name][ch]['target'] = target_str
+                
+                # 读取threshold
+                threshold_key = f'{ch}_threshold'
+                if threshold_key in col_map and col_map[threshold_key] < len(row):
+                    threshold_val = row.iloc[col_map[threshold_key]]
+                    if pd.notna(threshold_val):
+                        try:
+                            threshold = float(threshold_val)
+                            projects[project_name][ch]['threshold'] = threshold
+                        except:
+                            pass
+        
+        return projects
+    
+    except Exception as e:
+        print(f"读取项目Excel文件失败: {e}")
+        return {}
+
+
+def load_projects_data():
+    """加载项目数据，优先从目录下的projects.xls或projects.xlsx读取"""
+    # 默认项目数据
+    default_projects = {}
+    default_channels = ['FAM', 'VIC', 'CY5', 'ROX']
+    
+    try:
+        from projects_data import projects_data, channel_names as project_channel_names
+        default_projects = projects_data
+        default_channels = project_channel_names
+    except ImportError:
+        pass
+    
+    # 尝试从目录下的文件读取
+    base_dir = Path(__file__).parent
+    project_files = [
+        base_dir / 'projects.xlsx',
+        base_dir / 'projects.xls',
+    ]
+    
+    for file_path in project_files:
+        if file_path.exists():
+            try:
+                loaded_projects = load_projects_from_excel(str(file_path))
+                if loaded_projects:
+                    print(f"从 {file_path.name} 加载了 {len(loaded_projects)} 个项目")
+                    # 合并Excel数据和默认数据：Excel数据优先，但缺失的字段使用默认值
+                    merged_projects = {}
+                    # 先复制默认数据
+                    for project_name, project_config in default_projects.items():
+                        merged_projects[project_name] = {}
+                        merged_projects[project_name]['project_id'] = project_config.get('project_id', '')
+                        for ch in default_channels:
+                            if ch in project_config:
+                                merged_projects[project_name][ch] = project_config[ch].copy()
+                            else:
+                                merged_projects[project_name][ch] = {}
+                    
+                    # 然后用Excel数据更新（只更新存在的字段，不覆盖整个字典）
+                    for project_name, excel_config in loaded_projects.items():
+                        if project_name not in merged_projects:
+                            # 如果Excel中有新项目，直接添加
+                            merged_projects[project_name] = excel_config
+                        else:
+                            # 合并项目配置
+                            if 'project_id' in excel_config and excel_config['project_id']:
+                                merged_projects[project_name]['project_id'] = excel_config['project_id']
+                            
+                            # 合并通道配置
+                            for ch in default_channels:
+                                if ch in excel_config and excel_config[ch]:
+                                    # Excel中有该通道的配置，合并字段
+                                    if ch not in merged_projects[project_name]:
+                                        merged_projects[project_name][ch] = {}
+                                    # 更新target（如果Excel中有）
+                                    if 'target' in excel_config[ch] and excel_config[ch]['target']:
+                                        merged_projects[project_name][ch]['target'] = excel_config[ch]['target']
+                                    # 更新threshold（如果Excel中有）
+                                    if 'threshold' in excel_config[ch]:
+                                        merged_projects[project_name][ch]['threshold'] = excel_config[ch]['threshold']
+                                    if 'threshold2' in excel_config[ch]:
+                                        merged_projects[project_name][ch]['threshold2'] = excel_config[ch]['threshold2']
+                    
+                    return merged_projects, default_channels
+            except Exception as e:
+                print(f"读取 {file_path.name} 失败: {e}")
+    
+    # 如果没有找到文件或读取失败，返回默认值
+    return default_projects, default_channels
+
+
 class PCRAnalyzerApp(QMainWindow):
     """PCR分析软件主窗口"""
     
@@ -49,8 +244,12 @@ class PCRAnalyzerApp(QMainWindow):
         self.well_data_map = {}  # 孔位数据映射 {well_name: data}
         self.selected_channels = []  # 选中的通道
         self.curve_type = 'amplification'  # 当前曲线类型
-        self.selected_project = None  # 选中的项目名称
-        self.judgment_results = []  # 研判结果列表
+        self.selected_projects = []  # 选中的项目名称列表（支持多选）
+        self.judgment_results = []  # 结果判读列表
+        
+        # 加载项目数据
+        self.projects_data, self.project_channel_names = load_projects_data()
+        
         self.init_ui()
         
     def init_ui(self):
@@ -77,12 +276,9 @@ class PCRAnalyzerApp(QMainWindow):
         self.main_tab = self.create_main_tab()
         self.tabs.addTab(self.main_tab, "PCR分析")
         
-        # 数据展示标签页
-        self.data_tab = self.create_data_tab()
-        self.tabs.addTab(self.data_tab, "实验数据")
-        
         # 状态栏
         self.statusBar().showMessage('就绪')
+        
         
     def create_toolbar(self):
         """创建工具栏"""
@@ -93,12 +289,6 @@ class PCRAnalyzerApp(QMainWindow):
         self.open_btn = QPushButton('打开Excel文件')
         self.open_btn.clicked.connect(self.open_file)
         layout.addWidget(self.open_btn)
-        
-        # 导出按钮
-        self.export_btn = QPushButton('导出结果')
-        self.export_btn.clicked.connect(self.export_results)
-        self.export_btn.setEnabled(False)
-        layout.addWidget(self.export_btn)
         
         layout.addStretch()
         
@@ -127,6 +317,12 @@ class PCRAnalyzerApp(QMainWindow):
         # 孔板选择器（固定96孔板）
         self.plate_selector = PlateSelector(plate_type='96')
         self.plate_selector.well_selected.connect(self.on_well_selected)
+        # 设置孔板选择器的尺寸策略，保持矩形形状
+        # 96孔板是8行12列，计算实际需要的宽度：
+        # 行标签25 + 12列按钮(12*30) + 间距(11*2) + 边距 ≈ 420像素
+        # 高度：标题 + 列标签 + 8行按钮(8*30) + 间距 + 边距 ≈ 300像素
+        self.plate_selector.setMinimumSize(420, 300)
+        self.plate_selector.setMaximumSize(450, 320)
         left_layout.addWidget(self.plate_selector)
         
         # 通道选择
@@ -145,6 +341,11 @@ class PCRAnalyzerApp(QMainWindow):
         
         left_layout.addWidget(channel_group)
         
+        # 全选按钮
+        select_all_btn = QPushButton('全选')
+        select_all_btn.clicked.connect(self.select_all_wells_and_channels)
+        left_layout.addWidget(select_all_btn)
+        
         # 清除选择按钮
         clear_btn = QPushButton('清除选择')
         clear_btn.clicked.connect(self.clear_all_selection)
@@ -158,11 +359,8 @@ class PCRAnalyzerApp(QMainWindow):
         
         # 控制按钮
         control_layout = QHBoxLayout()
-        control_layout.addWidget(QLabel("显示选项:"))
         
-        # 曲线类型选择
-        curve_type_group = QGroupBox("曲线类型")
-        curve_type_layout = QHBoxLayout(curve_type_group)
+        # 曲线类型选择（只保留单选按钮，不显示组框和标签）
         self.curve_type_group = QButtonGroup()
         self.amplification_radio = QRadioButton('扩增曲线')
         self.amplification_radio.setChecked(True)
@@ -171,14 +369,8 @@ class PCRAnalyzerApp(QMainWindow):
         self.curve_type_group.addButton(self.raw_radio, 1)
         self.amplification_radio.toggled.connect(self.on_curve_type_changed)
         self.raw_radio.toggled.connect(self.on_curve_type_changed)
-        curve_type_layout.addWidget(self.amplification_radio)
-        curve_type_layout.addWidget(self.raw_radio)
-        control_layout.addWidget(curve_type_group)
-        
-        self.show_all_wells_check = QCheckBox('显示所有选中孔位')
-        self.show_all_wells_check.setChecked(True)
-        self.show_all_wells_check.stateChanged.connect(self.update_curves)
-        control_layout.addWidget(self.show_all_wells_check)
+        control_layout.addWidget(self.amplification_radio)
+        control_layout.addWidget(self.raw_radio)
         
         control_layout.addStretch()
         right_layout.addLayout(control_layout)
@@ -204,22 +396,53 @@ class PCRAnalyzerApp(QMainWindow):
         project_group = QGroupBox("项目选择")
         project_group_layout = QVBoxLayout(project_group)
         
+        # 保存项目组布局的引用，以便刷新项目列表
+        self.project_group_layout = project_group_layout
+        
+        # 导入项目按钮
+        import_project_btn = QPushButton('导入项目')
+        import_project_btn.clicked.connect(self.import_projects)
+        project_group_layout.addWidget(import_project_btn)
+        
+        # 搜索框
+        search_label = QLabel("搜索:")
+        project_group_layout.addWidget(search_label)
+        self.project_search_box = QLineEdit()
+        self.project_search_box.setPlaceholderText("输入项目名称或产品编号...")
+        self.project_search_box.textChanged.connect(self.on_project_search_changed)
+        project_group_layout.addWidget(self.project_search_box)
+        
         # 项目复选框列表
         self.project_checkboxes = {}
-        if projects_data:
-            for project_name in sorted(projects_data.keys()):
-                checkbox = QCheckBox(project_name)
-                # 创建包装函数来传递项目名称，避免lambda闭包问题
-                def make_handler(name):
-                    def handler(checked):
-                        self.on_project_changed(name)
-                    return handler
-                checkbox.stateChanged.connect(make_handler(project_name))
-                self.project_checkboxes[project_name] = checkbox
-                project_group_layout.addWidget(checkbox)
-        else:
-            no_project_label = QLabel("未找到项目数据")
-            project_group_layout.addWidget(no_project_label)
+        self.all_project_checkboxes = {}  # 保存所有项目复选框的引用
+        self.current_page = 1  # 当前页码
+        self.items_per_page = 20  # 每页显示的项目数
+        
+        self.refresh_project_list()
+        
+        # 分页控件（放在项目列表下方）
+        pagination_layout = QHBoxLayout()
+        pagination_layout.addStretch()
+        
+        self.prev_page_btn = QPushButton()
+        self.prev_page_btn.setIcon(self.style().standardIcon(QStyle.SP_ArrowLeft))
+        self.prev_page_btn.setFixedSize(30, 30)
+        self.prev_page_btn.clicked.connect(self.go_to_prev_page)
+        self.prev_page_btn.setEnabled(False)
+        pagination_layout.addWidget(self.prev_page_btn)
+        
+        self.page_label = QLabel('1/1')
+        pagination_layout.addWidget(self.page_label)
+        
+        self.next_page_btn = QPushButton()
+        self.next_page_btn.setIcon(self.style().standardIcon(QStyle.SP_ArrowRight))
+        self.next_page_btn.setFixedSize(30, 30)
+        self.next_page_btn.clicked.connect(self.go_to_next_page)
+        self.next_page_btn.setEnabled(False)
+        pagination_layout.addWidget(self.next_page_btn)
+        
+        pagination_layout.addStretch()
+        project_group_layout.addLayout(pagination_layout)
         
         project_group_layout.addStretch()
         project_layout.addWidget(project_group)
@@ -229,15 +452,20 @@ class PCRAnalyzerApp(QMainWindow):
         top_splitter.addWidget(left_panel)
         top_splitter.addWidget(right_panel)
         top_splitter.addWidget(project_panel)
-        top_splitter.setStretchFactor(0, 1)
-        top_splitter.setStretchFactor(1, 2)
-        top_splitter.setStretchFactor(2, 1)
+        # 设置各面板的拉伸因子和最小宽度
+        top_splitter.setStretchFactor(0, 1)  # 左侧孔板
+        top_splitter.setStretchFactor(1, 3)  # 中间曲线（增加宽度）
+        top_splitter.setStretchFactor(2, 1)  # 右侧项目
+        # 设置最小宽度，确保项目面板有足够空间（增加以容纳滚动条）
+        project_panel.setMinimumWidth(350)
+        # 增加左侧面板最小宽度，确保孔板完整显示（96孔板需要约420像素宽度）
+        left_panel.setMinimumWidth(450)
         
         # 添加到主布局（第一行）
         main_layout.addWidget(top_splitter, 2)  # 占据2倍空间
         
-        # 第二行：研判结果显示区域（单独一行，占据整个宽度）
-        judgment_group = QGroupBox("研判结果")
+        # 第二行：结果判读显示区域（单独一行，占据整个宽度）
+        judgment_group = QGroupBox("结果判读")
         judgment_layout = QVBoxLayout(judgment_group)
         
         # 结果显示表格（列数和列标题会根据选中的项目动态设置）
@@ -252,23 +480,26 @@ class PCRAnalyzerApp(QMainWindow):
         
         return widget
     
-    def create_data_tab(self):
-        """创建数据展示标签页"""
-        widget = QWidget()
-        layout = QVBoxLayout(widget)
+    def select_all_wells_and_channels(self):
+        """全选所有孔位和通道"""
+        # 全选所有通道
+        for checkbox in self.channel_checkboxes.values():
+            checkbox.blockSignals(True)
+            checkbox.setChecked(True)
+            checkbox.blockSignals(False)
         
-        # 信息显示区域
-        self.info_text = QTextEdit()
-        self.info_text.setReadOnly(True)
-        self.info_text.setMaximumHeight(150)
-        layout.addWidget(self.info_text)
+        # 更新选中的通道列表
+        self.selected_channels = list(self.channel_checkboxes.keys())
         
-        # 数据表格
-        self.data_table = QTableWidget()
-        layout.addWidget(self.data_table)
+        # 全选所有孔位（通过plate_selector的toggle_select_all方法）
+        if hasattr(self, 'plate_selector') and hasattr(self.plate_selector, 'toggle_select_all'):
+            # 检查是否已全部选中
+            all_selected = len(self.plate_selector.selected_wells) == len(self.plate_selector.well_buttons)
+            if not all_selected:
+                self.plate_selector.toggle_select_all()
         
-        return widget
-    
+        # 更新曲线显示
+        self.update_curves()
     
     def clear_all_selection(self):
         """清除所有选择（孔位和通道）"""
@@ -292,8 +523,8 @@ class PCRAnalyzerApp(QMainWindow):
         else:
             self.update_curves()
         
-        # 更新研判结果（根据选中的孔位）
-        if self.selected_project:
+        # 更新结果判读（根据选中的孔位）
+        if self.selected_projects:
             self.update_judgment_results()
     
     def on_channel_changed(self):
@@ -309,39 +540,11 @@ class PCRAnalyzerApp(QMainWindow):
         self.update_curves()
     
     def on_project_changed(self, sender_name=None):
-        """项目选择改变"""
-        # 如果传入了发送者名称，说明是特定复选框触发的
-        if sender_name:
-            sender_cb = self.project_checkboxes.get(sender_name)
-            if sender_cb and sender_cb.isChecked():
-                # 如果当前复选框被选中，取消其他所有复选框的选中状态
-                for name, cb in self.project_checkboxes.items():
-                    if name != sender_name and cb.isChecked():
-                        cb.blockSignals(True)
-                        cb.setChecked(False)
-                        cb.blockSignals(False)
-                self.selected_project = sender_name
-            else:
-                # 如果当前复选框被取消选中，清空选择
-                self.selected_project = None
-        else:
-            # 兼容旧逻辑：获取选中的项目（只允许选择一个）
-            selected_projects = [name for name, cb in self.project_checkboxes.items() if cb.isChecked()]
-            
-            if len(selected_projects) > 1:
-                # 如果选中了多个，只保留最后一个
-                for name in selected_projects[:-1]:
-                    self.project_checkboxes[name].blockSignals(True)
-                    self.project_checkboxes[name].setChecked(False)
-                    self.project_checkboxes[name].blockSignals(False)
-                selected_projects = selected_projects[-1:]
-            
-            if selected_projects:
-                self.selected_project = selected_projects[0]
-            else:
-                self.selected_project = None
+        """项目选择改变（支持多选）"""
+        # 获取所有选中的项目
+        self.selected_projects = [name for name, cb in self.project_checkboxes.items() if cb.isChecked()]
         
-        # 更新研判结果
+        # 更新结果判读
         self.update_judgment_results()
     
     def clear_all_state(self):
@@ -366,9 +569,9 @@ class PCRAnalyzerApp(QMainWindow):
                 checkbox.blockSignals(True)
                 checkbox.setChecked(False)
                 checkbox.blockSignals(False)
-        self.selected_project = None
+        self.selected_projects = []
         
-        # 清空研判结果表格
+        # 清空结果判读表格
         if hasattr(self, 'judgment_table'):
             self.judgment_table.setRowCount(0)
             self.judgment_table.setColumnCount(0)
@@ -392,11 +595,6 @@ class PCRAnalyzerApp(QMainWindow):
         # 清空信息显示
         if hasattr(self, 'curve_info'):
             self.curve_info.clear()
-        if hasattr(self, 'info_text'):
-            self.info_text.clear()
-        if hasattr(self, 'data_table'):
-            self.data_table.setRowCount(0)
-            self.data_table.setColumnCount(0)
     
     def open_file(self):
         """打开Excel文件"""
@@ -446,112 +644,43 @@ class PCRAnalyzerApp(QMainWindow):
                     print("警告: 数据模型中没有孔位数据！")
                 print(f"=== 调试信息结束 ===\n")
                 
-                # 显示数据
-                self.display_data()
+                # 更新孔板数据
                 self.update_plate_data()
                 
                 # 立即更新曲线显示
                 self.update_curves()
                 
-                # 更新研判结果
+                # 更新结果判读
                 self.update_judgment_results()
                 
                 self.statusBar().showMessage('文件解析完成')
-                self.export_btn.setEnabled(True)
                 
             except Exception as e:
                 QMessageBox.critical(self, '错误', f'解析文件失败:\n{str(e)}')
                 self.statusBar().showMessage('解析失败')
     
-    def display_data(self):
-        """显示解析的数据"""
-        if not self.parsed_data:
-            return
-        
-        # 显示基本信息
-        info = f"文件: {os.path.basename(self.current_file)}\n"
-        info += f"工作表数量: {len(self.parsed_data.get('sheets', {}))}\n"
-        
-        # 显示实验信息
-        if 'experiment_info' in self.parsed_data:
-            info += "\n实验信息:\n"
-            for key, value in self.parsed_data['experiment_info'].items():
-                info += f"  {key}: {value}\n"
-        
-        self.info_text.setText(info)
-        
-        # 显示数据表格
-        if 'amplification_data' in self.parsed_data:
-            data = self.parsed_data['amplification_data']
-            if not data.empty:
-                self.display_table(data)
-    
-    def display_table(self, df):
-        """在表格中显示数据"""
-        self.data_table.setRowCount(len(df))
-        self.data_table.setColumnCount(len(df.columns))
-        self.data_table.setHorizontalHeaderLabels([str(col) for col in df.columns])
-        
-        for i in range(len(df)):
-            for j in range(len(df.columns)):
-                value = df.iloc[i, j]
-                item = QTableWidgetItem(str(value) if pd.notna(value) else '')
-                self.data_table.setItem(i, j, item)
-    
     def update_plate_data(self):
         """更新孔板数据"""
-        if not self.parsed_data:
+        if not self.data_model:
             return
         
         self.well_data_map = {}
         
-        # 优先使用解析器提取的孔位数据
-        if 'well_data' in self.parsed_data:
-            for well_name, well_info in self.parsed_data['well_data'].items():
-                self.well_data_map[well_name] = {
-                    'ct': well_info.get('ct'),
-                    'data': well_info
-                }
-        
-        # 如果amplification_data中有孔位信息，也提取
-        if 'amplification_data' in self.parsed_data:
-            data = self.parsed_data['amplification_data']
-            if not data.empty:
-                # 检查是否有孔位列
-                if 'Well' in data.columns or '孔位' in data.columns:
-                    well_col = 'Well' if 'Well' in data.columns else '孔位'
-                    for idx, row in data.iterrows():
-                        well_name = str(row[well_col]) if pd.notna(row[well_col]) else None
-                        if well_name and well_name not in self.well_data_map:
-                            # 提取Ct值等信息
-                            ct_value = None
-                            for col in ['Ct', 'CT', 'ct']:
-                                if col in data.columns:
-                                    ct_value = row[col] if pd.notna(row[col]) else None
-                                    break
-                            
-                            self.well_data_map[well_name] = {
-                                'ct': ct_value,
-                                'data': row
-                            }
-        
-        # 如果没有提取到孔位数据，生成示例数据用于演示
-        if not self.well_data_map:
-            rows = 8  # 96孔板：A-H
-            cols = 12  # 96孔板：1-12
+        # 从data_model中获取CT值
+        for well_name, well in self.data_model.wells.items():
+            # 获取所有通道的CT值，选择最小的CT值显示（如果有多个通道）
+            ct_value = None
+            if well.ct_values:
+                # 获取所有有效的CT值
+                valid_cts = [ct for ct in well.ct_values.values() if ct is not None and pd.notna(ct)]
+                if valid_cts:
+                    # 使用最小的CT值（通常表示最早检测到信号）
+                    ct_value = min(valid_cts)
             
-            import random
-            for row_idx in range(rows):
-                row_label = chr(65 + row_idx)
-                for col in range(1, cols + 1):
-                    well_name = f"{row_label}{col}"
-                    # 随机生成一些Ct值用于演示
-                    if random.random() > 0.3:  # 70%的孔有数据
-                        ct = random.uniform(20, 40)
-                        self.well_data_map[well_name] = {
-                            'ct': ct,
-                            'data': None
-                        }
+            self.well_data_map[well_name] = {
+                'ct': ct_value,
+                'data': well
+            }
         
         # 更新孔板显示
         for well_name, data in self.well_data_map.items():
@@ -604,9 +733,7 @@ class PCRAnalyzerApp(QMainWindow):
             self.canvas.draw()
             return
         
-        # 如果只显示一个孔位
-        if not self.show_all_wells_check.isChecked() and selected_wells:
-            selected_wells = [selected_wells[0]]
+        # 始终显示所有选中的孔位（不再限制为只显示一个）
         
         # 绘制曲线
         try:
@@ -655,62 +782,221 @@ class PCRAnalyzerApp(QMainWindow):
         
         self.curve_info.setText(info_text)
     
-    def export_results(self):
-        """导出分析结果"""
-        if not self.parsed_data:
+    def on_project_search_changed(self, text):
+        """项目搜索框内容改变时的处理"""
+        self.current_page = 1  # 搜索时重置到第一页
+        self.filter_project_list(text)
+    
+    def get_filtered_projects(self, search_text=""):
+        """获取过滤后的项目列表"""
+        if not self.projects_data:
+            return []
+        
+        search_text = search_text.strip().upper()
+        filtered_projects = []
+        
+        for project_name in sorted(self.projects_data.keys()):
+            if not search_text:
+                # 如果没有搜索文本，包含所有项目
+                filtered_projects.append(project_name)
+            else:
+                # 检查项目名称是否匹配
+                project_name_match = search_text in project_name.upper()
+                
+                # 检查产品编号是否匹配
+                project_id_match = False
+                if project_name in self.projects_data:
+                    project_id = self.projects_data[project_name].get('project_id', '')
+                    if project_id and search_text in str(project_id).upper():
+                        project_id_match = True
+                
+                # 如果项目名称或产品编号匹配，包含该项目
+                if project_name_match or project_id_match:
+                    filtered_projects.append(project_name)
+        
+        return filtered_projects
+    
+    def filter_project_list(self, search_text=""):
+        """根据搜索文本和分页过滤项目列表"""
+        if not hasattr(self, 'all_project_checkboxes'):
             return
         
-        file_path, _ = QFileDialog.getSaveFileName(
-            self, '保存结果', '', 'Excel Files (*.xlsx)'
+        # 获取过滤后的项目列表
+        filtered_projects = self.get_filtered_projects(search_text)
+        
+        # 计算总页数
+        total_pages = max(1, (len(filtered_projects) + self.items_per_page - 1) // self.items_per_page)
+        
+        # 确保当前页在有效范围内
+        if self.current_page > total_pages:
+            self.current_page = total_pages
+        if self.current_page < 1:
+            self.current_page = 1
+        
+        # 计算当前页的项目范围
+        start_idx = (self.current_page - 1) * self.items_per_page
+        end_idx = start_idx + self.items_per_page
+        current_page_projects = filtered_projects[start_idx:end_idx]
+        
+        # 显示或隐藏项目复选框
+        for project_name, checkbox in self.all_project_checkboxes.items():
+            checkbox.setVisible(project_name in current_page_projects)
+        
+        # 更新分页控件
+        self.update_pagination_controls(total_pages, len(filtered_projects))
+    
+    def update_pagination_controls(self, total_pages, total_items):
+        """更新分页控件状态"""
+        if not hasattr(self, 'page_label') or not self.page_label:
+            return  # 分页控件还未创建
+        self.page_label.setText(f'{self.current_page}/{total_pages}')
+        self.prev_page_btn.setEnabled(self.current_page > 1)
+        self.next_page_btn.setEnabled(self.current_page < total_pages)
+    
+    def go_to_prev_page(self):
+        """跳转到上一页"""
+        if self.current_page > 1:
+            self.current_page -= 1
+            if hasattr(self, 'project_search_box'):
+                self.filter_project_list(self.project_search_box.text())
+    
+    def go_to_next_page(self):
+        """跳转到下一页"""
+        if hasattr(self, 'project_search_box'):
+            search_text = self.project_search_box.text()
+            filtered_projects = self.get_filtered_projects(search_text)
+            total_pages = max(1, (len(filtered_projects) + self.items_per_page - 1) // self.items_per_page)
+            if self.current_page < total_pages:
+                self.current_page += 1
+                self.filter_project_list(search_text)
+    
+    def refresh_project_list(self):
+        """刷新项目列表显示"""
+        # 清除现有的复选框和标签（保留导入按钮和搜索框）
+        widgets_to_remove = []
+        for i in range(self.project_group_layout.count()):
+            item = self.project_group_layout.itemAt(i)
+            if item:
+                widget = item.widget()
+                # 保留导入按钮（索引0）、搜索标签、搜索框
+                if widget and isinstance(widget, QCheckBox):
+                    widgets_to_remove.append(widget)
+                elif widget and isinstance(widget, QLabel) and widget.text() == "未找到项目数据":
+                    widgets_to_remove.append(widget)
+        
+        for widget in widgets_to_remove:
+            widget.setParent(None)
+            self.project_group_layout.removeWidget(widget)
+        
+        self.project_checkboxes.clear()
+        self.all_project_checkboxes.clear()
+        
+        # 添加新的项目复选框（跳过导入按钮、搜索标签和搜索框）
+        if self.projects_data:
+            for project_name in sorted(self.projects_data.keys()):
+                checkbox = QCheckBox(project_name)
+                # 创建包装函数来传递项目名称，避免lambda闭包问题
+                def make_handler(name):
+                    def handler(checked):
+                        self.on_project_changed(name)
+                    return handler
+                checkbox.stateChanged.connect(make_handler(project_name))
+                self.project_checkboxes[project_name] = checkbox
+                self.all_project_checkboxes[project_name] = checkbox
+                # 插入到搜索框之后（索引3：导入按钮0，搜索标签1，搜索框2）
+                self.project_group_layout.insertWidget(3, checkbox)
+            
+            # 应用当前的搜索过滤和分页
+            if hasattr(self, 'project_search_box'):
+                self.current_page = 1  # 刷新时重置到第一页
+                self.filter_project_list(self.project_search_box.text())
+        else:
+            no_project_label = QLabel("未找到项目数据")
+            self.project_group_layout.insertWidget(3, no_project_label)
+    
+    def import_projects(self):
+        """导入项目Excel文件"""
+        file_path, _ = QFileDialog.getOpenFileName(
+            self, '选择项目Excel文件', '', 'Excel Files (*.xlsx *.xls)'
         )
         
         if file_path:
             try:
-                # 导出逻辑
-                with pd.ExcelWriter(file_path, engine='openpyxl') as writer:
-                    if 'amplification_data' in self.parsed_data:
-                        self.parsed_data['amplification_data'].to_excel(
-                            writer, sheet_name='分析结果', index=False
-                        )
-                QMessageBox.information(self, '成功', '结果已导出')
+                loaded_projects = load_projects_from_excel(file_path)
+                if loaded_projects:
+                    # 合并Excel数据和现有数据（Excel数据优先，但缺失的字段使用现有值）
+                    # 先获取默认数据
+                    try:
+                        from projects_data import projects_data as default_projects_data
+                    except ImportError:
+                        default_projects_data = {}
+                    
+                    # 合并数据
+                    merged_projects = {}
+                    # 先复制现有数据（如果有）
+                    for project_name, project_config in self.projects_data.items():
+                        merged_projects[project_name] = {}
+                        merged_projects[project_name]['project_id'] = project_config.get('project_id', '')
+                        for ch in self.project_channel_names:
+                            if ch in project_config:
+                                merged_projects[project_name][ch] = project_config[ch].copy()
+                            else:
+                                merged_projects[project_name][ch] = {}
+                    
+                    # 然后用Excel数据更新
+                    for project_name, excel_config in loaded_projects.items():
+                        if project_name not in merged_projects:
+                            # 如果Excel中有新项目，直接添加
+                            merged_projects[project_name] = excel_config
+                        else:
+                            # 合并项目配置
+                            if 'project_id' in excel_config and excel_config['project_id']:
+                                merged_projects[project_name]['project_id'] = excel_config['project_id']
+                            
+                            # 合并通道配置
+                            for ch in self.project_channel_names:
+                                if ch in excel_config and excel_config[ch]:
+                                    # Excel中有该通道的配置，合并字段
+                                    if ch not in merged_projects[project_name]:
+                                        merged_projects[project_name][ch] = {}
+                                    # 更新target（如果Excel中有且不为空）
+                                    if 'target' in excel_config[ch] and excel_config[ch].get('target'):
+                                        merged_projects[project_name][ch]['target'] = excel_config[ch]['target']
+                                    # 更新threshold（如果Excel中有）
+                                    if 'threshold' in excel_config[ch]:
+                                        merged_projects[project_name][ch]['threshold'] = excel_config[ch]['threshold']
+                                    if 'threshold2' in excel_config[ch]:
+                                        merged_projects[project_name][ch]['threshold2'] = excel_config[ch]['threshold2']
+                    
+                    # 更新项目数据
+                    self.projects_data = merged_projects
+                    # 刷新项目列表
+                    self.refresh_project_list()
+                    # 清空当前选择
+                    self.selected_projects = []
+                    # 更新结果判读
+                    self.update_judgment_results()
+                    QMessageBox.information(self, '成功', f'成功导入 {len(loaded_projects)} 个项目')
+                else:
+                    QMessageBox.warning(self, '警告', '未能从文件中读取到项目数据')
             except Exception as e:
-                QMessageBox.critical(self, '错误', f'导出失败:\n{str(e)}')
+                QMessageBox.critical(self, '错误', f'导入项目失败:\n{str(e)}')
     
     def update_judgment_results(self):
-        """更新研判结果显示"""
-        if not self.data_model or not self.selected_project:
-            # 清空表格
+        """更新结果判读显示（支持多项目）"""
+        if not self.data_model:
+            # 如果没有数据模型，显示提示
             self.judgment_table.setRowCount(0)
+            self.judgment_table.setColumnCount(1)
+            self.judgment_table.setHorizontalHeaderLabels(['提示'])
+            self.judgment_table.setRowCount(1)
+            self.judgment_table.setItem(0, 0, QTableWidgetItem("请先打开Excel文件"))
             return
         
-        # 获取项目配置
-        if self.selected_project not in projects_data:
+        if not self.selected_projects:
+            # 如果没有选择项目，清空表格
             self.judgment_table.setRowCount(0)
             return
-        
-        project_config = projects_data[self.selected_project]
-        
-        # 筛选出有target的通道
-        valid_channels = []
-        for ch_name in project_channel_names:
-            if ch_name in project_config:
-                ch_config = project_config[ch_name]
-                target = ch_config.get('target', '')
-                # 只包含有target且target不为空的通道
-                if target and target.strip() and target.strip() != '\\' and target.strip() != '/':
-                    valid_channels.append(ch_name)
-        
-        # 如果没有有效通道，清空表格
-        if not valid_channels:
-            self.judgment_table.setRowCount(0)
-            self.judgment_table.setColumnCount(0)
-            return
-        
-        # 设置表格列数和列标题
-        column_count = 2 + len(valid_channels) + 1  # Well + 项目名 + 通道列 + 判读结果
-        self.judgment_table.setColumnCount(column_count)
-        headers = ['Well', '项目名'] + valid_channels + ['判读结果']
-        self.judgment_table.setHorizontalHeaderLabels(headers)
         
         # 获取在孔板中选择的孔位
         selected_wells = self.plate_selector.get_selected_wells()
@@ -726,7 +1012,42 @@ class PCRAnalyzerApp(QMainWindow):
             self.judgment_table.setRowCount(0)
             return
         
-        # 准备结果数据
+        # 收集所有项目的有效通道（合并所有项目的通道）
+        all_valid_channels = set()
+        projects_configs = {}
+        
+        for project_name in self.selected_projects:
+            if project_name not in self.projects_data:
+                continue
+            
+            project_config = self.projects_data[project_name]
+            projects_configs[project_name] = project_config
+            
+            # 筛选出有target的通道
+            for ch_name in self.project_channel_names:
+                if ch_name in project_config:
+                    ch_config = project_config[ch_name]
+                    target = ch_config.get('target', '')
+                    # 只包含有target且target不为空的通道
+                    if target and target.strip() and target.strip() != '\\' and target.strip() != '/':
+                        all_valid_channels.add(ch_name)
+        
+        # 如果没有有效通道，清空表格
+        if not all_valid_channels:
+            self.judgment_table.setRowCount(0)
+            self.judgment_table.setColumnCount(0)
+            return
+        
+        # 按字母顺序排序通道
+        valid_channels = sorted(list(all_valid_channels))
+        
+        # 设置表格列数和列标题
+        column_count = 3 + len(valid_channels) + 1  # Well + 项目名 + 产品编号 + 通道列 + 判读结果
+        self.judgment_table.setColumnCount(column_count)
+        headers = ['Well', '项目名', '产品编号'] + valid_channels + ['判读结果']
+        self.judgment_table.setHorizontalHeaderLabels(headers)
+        
+        # 准备结果数据（每个孔位 × 每个项目）
         results = []
         
         for well_name in sorted(all_wells):
@@ -734,41 +1055,53 @@ class PCRAnalyzerApp(QMainWindow):
             if not well:
                 continue
             
-            # 获取各通道的CT值（只处理有效通道）
-            ct_values = {}
-            positive_targets = []
-            
-            def get_ct_value(channel_name):
-                """获取通道的CT值，VIC和HEX等价，如果VIC没有数据则取HEX的数据"""
-                ct_value = well.ct_values.get(channel_name, None)
-                # 如果VIC没有数据，尝试从HEX获取
-                if channel_name == 'VIC' and ct_value is None:
-                    ct_value = well.ct_values.get('HEX', None)
-                return ct_value
-            
-            for ch_name in valid_channels:
-                # 获取CT值（VIC和HEX等价）
-                ct_value = get_ct_value(ch_name)
-                ct_values[ch_name] = ct_value
+            # 为每个选中的项目生成结果
+            for project_name in self.selected_projects:
+                if project_name not in projects_configs:
+                    continue
                 
-                # 判断是否阳性
-                if ch_name in project_config:
-                    ch_config = project_config[ch_name]
-                    threshold = ch_config.get('threshold', None)
-                    target = ch_config.get('target', '')
+                project_config = projects_configs[project_name]
+                
+                # 获取各通道的CT值（只处理有效通道）
+                ct_values = {}
+                positive_targets = []
+                
+                def get_ct_value(channel_name):
+                    """获取通道的CT值，VIC和HEX等价，如果VIC没有数据则取HEX的数据"""
+                    ct_value = well.ct_values.get(channel_name, None)
+                    # 如果VIC没有数据，尝试从HEX获取
+                    if channel_name == 'VIC' and ct_value is None:
+                        ct_value = well.ct_values.get('HEX', None)
+                    return ct_value
+                
+                for ch_name in valid_channels:
+                    # 获取CT值（VIC和HEX等价）
+                    ct_value = get_ct_value(ch_name)
+                    ct_values[ch_name] = ct_value
                     
-                    if ct_value is not None and threshold is not None:
-                        # CT值小于阈值则为阳性（CT值越小，扩增越早，越可能是阳性）
-                        if ct_value < threshold:
-                            positive_targets.append(target if target else ch_name)
-            
-            # 所有孔位都添加到结果中，即使没有CT值
-            results.append({
-                'well': well_name,
-                'project': self.selected_project,
-                'ct_values': ct_values,
-                'positive_targets': positive_targets
-            })
+                    # 判断是否阳性（只判断当前项目配置中包含的通道）
+                    if ch_name in project_config:
+                        ch_config = project_config[ch_name]
+                        threshold = ch_config.get('threshold', None)
+                        target = ch_config.get('target', '')
+                        
+                        if ct_value is not None and threshold is not None:
+                            # CT值小于阈值则为阳性（CT值越小，扩增越早，越可能是阳性）
+                            if ct_value < threshold:
+                                positive_targets.append(target if target else ch_name)
+                
+                # 获取产品编号
+                project_id = project_config.get('project_id', '')
+                
+                # 添加到结果中
+                results.append({
+                    'well': well_name,
+                    'project': project_name,
+                    'project_id': project_id,
+                    'ct_values': ct_values,
+                    'positive_targets': positive_targets,
+                    'project_config': project_config
+                })
         
         # 更新表格
         self.judgment_table.setRowCount(len(results))
@@ -780,8 +1113,13 @@ class PCRAnalyzerApp(QMainWindow):
             # 项目名
             self.judgment_table.setItem(row_idx, 1, QTableWidgetItem(result['project']))
             
+            # 产品编号
+            project_id = result.get('project_id', '')
+            self.judgment_table.setItem(row_idx, 2, QTableWidgetItem(str(project_id) if project_id else ''))
+            
             # 各通道CT值（只显示有效通道）
-            for col_idx, ch_name in enumerate(valid_channels, 2):
+            project_config = result['project_config']
+            for col_idx, ch_name in enumerate(valid_channels, 3):
                 ct_value = result['ct_values'].get(ch_name)
                 # 如果VIC没有数据，尝试从HEX获取（在显示时也需要处理）
                 if ct_value is None and ch_name == 'VIC':
@@ -790,9 +1128,10 @@ class PCRAnalyzerApp(QMainWindow):
                         ct_value = well.ct_values.get('HEX', None)
                         # 更新结果中的CT值，以便后续判断使用
                         result['ct_values'][ch_name] = ct_value
+                
                 if ct_value is not None:
                     item = QTableWidgetItem(f"{ct_value:.2f}")
-                    # 根据是否阳性设置颜色
+                    # 根据是否阳性设置颜色（只判断当前项目配置中包含的通道）
                     if ch_name in project_config:
                         ch_config = project_config[ch_name]
                         threshold = ch_config.get('threshold', None)
@@ -805,7 +1144,7 @@ class PCRAnalyzerApp(QMainWindow):
                     self.judgment_table.setItem(row_idx, col_idx, QTableWidgetItem("N/A"))
             
             # 判读结果（阳性targets）
-            result_col_idx = 2 + len(valid_channels)  # 判读结果列索引
+            result_col_idx = 3 + len(valid_channels)  # 判读结果列索引
             if result['positive_targets']:
                 result_text = ", ".join(result['positive_targets'])
                 item = QTableWidgetItem(result_text)
@@ -821,7 +1160,7 @@ class PCRAnalyzerApp(QMainWindow):
 def main():
     app = QApplication(sys.argv)
     window = PCRAnalyzerApp()
-    window.show()
+    window.showMaximized()  # 启动时最大化窗口
     sys.exit(app.exec_())
 
 

@@ -37,8 +37,13 @@ class PlateSelector(QWidget):
         self.plate_widget = QWidget()
         self.plate_layout = QGridLayout(self.plate_widget)
         self.plate_layout.setSpacing(2)
+        self.plate_layout.setContentsMargins(5, 5, 5, 5)  # 设置边距
         
         self.create_plate_grid()
+        
+        # 设置plate_widget的尺寸策略，确保内容不被裁剪
+        from PyQt5.QtWidgets import QSizePolicy
+        self.plate_widget.setSizePolicy(QSizePolicy.MinimumExpanding, QSizePolicy.MinimumExpanding)
         
         layout.addWidget(self.plate_widget)
         layout.addStretch()
@@ -52,23 +57,58 @@ class PlateSelector(QWidget):
             rows = 16  # A-P
             cols = 24  # 1-24
         
-        # 添加列标题（1-12或1-24）
+        # 添加列标题（1-12或1-24），可点击全选列
+        self.col_labels = {}
         for col in range(1, cols + 1):
-            label = QLabel(str(col))
-            label.setAlignment(Qt.AlignCenter)
+            label = QPushButton(str(col))
             label.setMinimumWidth(30)
             label.setMaximumWidth(30)
+            label.setMinimumHeight(25)
+            label.setMaximumHeight(25)
+            label.setStyleSheet("""
+                QPushButton {
+                    background-color: #e0e0e0;
+                    border: 1px solid #999;
+                    border-radius: 2px;
+                    font-weight: bold;
+                    text-align: center;
+                }
+                QPushButton:hover {
+                    background-color: #d0d0d0;
+                }
+            """)
+            # 连接点击事件，全选该列
+            label.clicked.connect(lambda checked, c=col: self.select_column(c))
+            self.col_labels[col] = label
             self.plate_layout.addWidget(label, 0, col)
         
         # 添加行标题和按钮
         row_labels = [chr(65 + i) for i in range(rows)]  # A, B, C, ...
         
+        # 存储行标签引用
+        self.row_labels = {}
         for row_idx, row_label in enumerate(row_labels, 1):
-            # 行标签
-            label = QLabel(row_label)
-            label.setAlignment(Qt.AlignCenter)
+            # 行标签，可点击全选行
+            label = QPushButton(row_label)
             label.setMinimumWidth(25)
             label.setMaximumWidth(25)
+            label.setMinimumHeight(30)
+            label.setMaximumHeight(30)
+            label.setStyleSheet("""
+                QPushButton {
+                    background-color: #e0e0e0;
+                    border: 1px solid #999;
+                    border-radius: 2px;
+                    font-weight: bold;
+                    text-align: center;
+                }
+                QPushButton:hover {
+                    background-color: #d0d0d0;
+                }
+            """)
+            # 连接点击事件，全选该行
+            label.clicked.connect(lambda checked, r=row_label: self.select_row(r))
+            self.row_labels[row_label] = label
             self.plate_layout.addWidget(label, row_idx, 0)
             
             # 创建按钮
@@ -155,13 +195,17 @@ class PlateSelector(QWidget):
         # 更新按钮显示
         if well_name in self.well_buttons:
             btn = self.well_buttons[well_name]
-            # 如果有Ct值，显示在按钮上
+            # 如果有Ct值，显示在按钮上（显示为整数）
             if 'ct' in data and pd.notna(data['ct']):
-                btn.setText(f"{data['ct']:.1f}")
-                btn.setToolTip(f"孔位 {well_name}\nCt值: {data['ct']:.2f}")
+                ct_value = data['ct']
+                # 转换为整数显示
+                ct_int = int(round(ct_value))
+                btn.setText(str(ct_int))
+                btn.setToolTip(f"孔位 {well_name}\nCt值: {ct_value:.2f}")
             else:
-                btn.setText("")
-                btn.setToolTip(f"孔位 {well_name}")
+                # 没有CT值时显示N/A
+                btn.setText("N/A")
+                btn.setToolTip(f"孔位 {well_name}\nCt值: 无")
             
             # 根据数据状态更新颜色
             self.update_well_style(well_name, data)
@@ -237,6 +281,126 @@ class PlateSelector(QWidget):
     def get_selected_wells(self):
         """获取选中的孔位列表"""
         return list(self.selected_wells)
+    
+    def select_row(self, row_label):
+        """全选或取消全选指定行"""
+        if self.plate_type == '96':
+            cols = 12
+        else:  # 384
+            cols = 24
+        
+        # 获取该行的所有孔位
+        row_wells = [f"{row_label}{col}" for col in range(1, cols + 1)]
+        
+        # 检查该行是否已全部选中
+        all_selected = all(well in self.selected_wells for well in row_wells)
+        
+        # 如果全部选中，则取消全选；否则全选
+        for well_name in row_wells:
+            if well_name in self.well_buttons:
+                btn = self.well_buttons[well_name]
+                btn.blockSignals(True)
+                if all_selected:
+                    # 取消选中
+                    btn.setChecked(False)
+                    self.selected_wells.discard(well_name)
+                    # 恢复样式
+                    if well_name in self.well_data:
+                        self.update_well_style(well_name, self.well_data[well_name])
+                    else:
+                        btn.setStyleSheet(self.get_default_button_style())
+                else:
+                    # 选中
+                    btn.setChecked(True)
+                    self.selected_wells.add(well_name)
+                    btn.setStyleSheet("""
+                        QPushButton {
+                            background-color: #4CAF50;
+                            border: 2px solid #2E7D32;
+                            border-radius: 3px;
+                        }
+                    """)
+                btn.blockSignals(False)
+        
+        # 发出信号
+        self.well_selected.emit("")
+    
+    def select_column(self, col):
+        """全选或取消全选指定列"""
+        if self.plate_type == '96':
+            rows = 8  # A-H
+        else:  # 384
+            rows = 16  # A-P
+        
+        row_labels = [chr(65 + i) for i in range(rows)]  # A, B, C, ...
+        
+        # 获取该列的所有孔位
+        col_wells = [f"{row_label}{col}" for row_label in row_labels]
+        
+        # 检查该列是否已全部选中
+        all_selected = all(well in self.selected_wells for well in col_wells)
+        
+        # 如果全部选中，则取消全选；否则全选
+        for well_name in col_wells:
+            if well_name in self.well_buttons:
+                btn = self.well_buttons[well_name]
+                btn.blockSignals(True)
+                if all_selected:
+                    # 取消选中
+                    btn.setChecked(False)
+                    self.selected_wells.discard(well_name)
+                    # 恢复样式
+                    if well_name in self.well_data:
+                        self.update_well_style(well_name, self.well_data[well_name])
+                    else:
+                        btn.setStyleSheet(self.get_default_button_style())
+                else:
+                    # 选中
+                    btn.setChecked(True)
+                    self.selected_wells.add(well_name)
+                    btn.setStyleSheet("""
+                        QPushButton {
+                            background-color: #4CAF50;
+                            border: 2px solid #2E7D32;
+                            border-radius: 3px;
+                        }
+                    """)
+                btn.blockSignals(False)
+        
+        # 发出信号
+        self.well_selected.emit("")
+    
+    def toggle_select_all(self):
+        """全选或取消全选所有孔位"""
+        # 检查是否已全部选中
+        all_selected = len(self.selected_wells) == len(self.well_buttons)
+        
+        for well_name, btn in self.well_buttons.items():
+            btn.blockSignals(True)
+            if all_selected:
+                # 取消全选
+                btn.setChecked(False)
+                self.selected_wells.discard(well_name)
+                # 恢复样式
+                if well_name in self.well_data:
+                    self.update_well_style(well_name, self.well_data[well_name])
+                else:
+                    btn.setStyleSheet(self.get_default_button_style())
+            else:
+                # 全选
+                btn.setChecked(True)
+                self.selected_wells.add(well_name)
+                btn.setStyleSheet("""
+                    QPushButton {
+                        background-color: #4CAF50;
+                        border: 2px solid #2E7D32;
+                        border-radius: 3px;
+                    }
+                """)
+            btn.blockSignals(False)
+        
+        # 发出信号
+        self.well_selected.emit("")
 
 
 # 修复导入

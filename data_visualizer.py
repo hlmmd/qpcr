@@ -46,7 +46,7 @@ class DataVisualizer:
         if curve_type == 'amplification':
             df = data_model.get_amplification_data(well_names, channel_names)
             y_column = 'Amplification'
-            y_label = '扩增值 (Amplification)'
+            y_label = '荧光值'
             title = 'PCR扩增曲线'
         else:  # raw
             df = data_model.get_raw_data(well_names, channel_names)
@@ -122,7 +122,7 @@ class DataVisualizer:
                            linewidth=2)
                     plotted_count += 1
         
-        ax.set_xlabel('循环数 (Cycle)', fontsize=12)
+        ax.set_xlabel('循环数', fontsize=12)
         ax.set_ylabel(y_label, fontsize=12)
         
         # 设置y轴范围
