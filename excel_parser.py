@@ -428,6 +428,7 @@ class VendorAParser(BaseParser):
         well_col_idx = None
         channel_col_idx = None
         ct_col_idx = None
+        sample_name_col_idx = None  # 样本名称列
         data_start_col = None
         
         # 查找表头行（通常是第13行，索引13）
@@ -443,6 +444,14 @@ class VendorAParser(BaseParser):
                 well_col_idx = 0  # 第一列是反应孔
                 channel_col_idx = 6  # 第7列是染色（FAM等），第6列是通道编号
                 ct_col_idx = 12  # 第13列是Ct
+                
+                # 查找样本名称列（查找包含"样本"、"样本名称"、"Sample"等关键词的列）
+                for col_idx in range(len(row)):
+                    if pd.notna(row.iloc[col_idx]):
+                        col_str = str(row.iloc[col_idx])
+                        if '样本名称' in col_str or '样本' in col_str or 'Sample' in col_str.upper() or '样品名称' in col_str or '样品' in col_str:
+                            sample_name_col_idx = col_idx
+                            break
                 
                 # 查找数据开始列（查找包含"1.0"的列，通常是第39列）
                 for col_idx in range(35, min(45, len(row))):
@@ -476,7 +485,7 @@ class VendorAParser(BaseParser):
             print("未找到表头行")
             return pd.DataFrame()
         
-        print(f"找到表头行: {header_row_idx}, 孔位列: {well_col_idx}, 通道列: {channel_col_idx}, Ct列: {ct_col_idx}, 数据开始列: {data_start_col}")
+        print(f"找到表头行: {header_row_idx}, 孔位列: {well_col_idx}, 通道列: {channel_col_idx}, Ct列: {ct_col_idx}, 样本名称列: {sample_name_col_idx}, 数据开始列: {data_start_col}")
         
         # 提取数据
         data_rows = []
@@ -498,6 +507,13 @@ class VendorAParser(BaseParser):
             
             if not well_name:
                 continue
+            
+            # 获取样本名称
+            sample_name = None
+            if sample_name_col_idx is not None and sample_name_col_idx < len(row):
+                sample_val = row.iloc[sample_name_col_idx]
+                if pd.notna(sample_val):
+                    sample_name = str(sample_val).strip()
             
             # 获取通道
             channel_name = None
@@ -543,6 +559,9 @@ class VendorAParser(BaseParser):
                             # 只在第一行添加CT值
                             if cycle_num == 1 and ct_value is not None:
                                 row_data['Ct'] = ct_value
+                            # 每行都添加样本名称（如果存在）
+                            if sample_name:
+                                row_data['SampleName'] = sample_name
                             data_rows.append(row_data)
                             cycle_num += 1
                             max_cycles = max(max_cycles, cycle_num)

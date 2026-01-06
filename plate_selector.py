@@ -115,9 +115,13 @@ class PlateSelector(QWidget):
             for col in range(1, cols + 1):
                 well_name = f"{row_label}{col}"
                 btn = QPushButton("")
-                btn.setMinimumSize(30, 30)
-                btn.setMaximumSize(30, 30)
+                btn.setMinimumSize(40, 40)
+                btn.setMaximumSize(40, 40)
                 btn.setCheckable(True)
+                # 设置字体大小，确保浮点数清晰可读
+                font = btn.font()
+                font.setPointSize(8)
+                btn.setFont(font)
                 btn.setStyleSheet(self.get_default_button_style())
                 
                 # 连接信号
@@ -133,6 +137,7 @@ class PlateSelector(QWidget):
                 background-color: #f0f0f0;
                 border: 1px solid #ccc;
                 border-radius: 3px;
+                font-size: 8pt;
             }
             QPushButton:hover {
                 background-color: #e0e0e0;
@@ -195,12 +200,11 @@ class PlateSelector(QWidget):
         # 更新按钮显示
         if well_name in self.well_buttons:
             btn = self.well_buttons[well_name]
-            # 如果有Ct值，显示在按钮上（显示为整数）
+            # 如果有Ct值，显示在按钮上（显示为浮点数）
             if 'ct' in data and pd.notna(data['ct']):
                 ct_value = data['ct']
-                # 转换为整数显示
-                ct_int = int(round(ct_value))
-                btn.setText(str(ct_int))
+                # 显示原始浮点数（保留2位小数）
+                btn.setText(f"{ct_value:.2f}")
                 btn.setToolTip(f"孔位 {well_name}\nCt值: {ct_value:.2f}")
             else:
                 # 没有CT值时显示N/A

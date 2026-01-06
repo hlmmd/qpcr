@@ -368,10 +368,10 @@ class PCRAnalyzerApp(QMainWindow):
         self.plate_selector.well_selected.connect(self.on_well_selected)
         # 设置孔板选择器的尺寸策略，保持矩形形状
         # 96孔板是8行12列，计算实际需要的宽度：
-        # 行标签25 + 12列按钮(12*30) + 间距(11*2) + 边距 ≈ 420像素
-        # 高度：标题 + 列标签 + 8行按钮(8*30) + 间距 + 边距 ≈ 300像素
-        self.plate_selector.setMinimumSize(420, 300)
-        self.plate_selector.setMaximumSize(450, 320)
+        # 行标签25 + 12列按钮(12*40) + 间距(11*2) + 边距 ≈ 550像素
+        # 高度：标题 + 列标签 + 8行按钮(8*40) + 间距 + 边距 ≈ 380像素
+        self.plate_selector.setMinimumSize(550, 380)
+        self.plate_selector.setMaximumSize(600, 420)
         left_layout.addWidget(self.plate_selector)
         
         # 通道选择
@@ -508,15 +508,28 @@ class PCRAnalyzerApp(QMainWindow):
         top_splitter.setStretchFactor(2, 1)  # 右侧项目
         # 设置最小宽度，确保项目面板有足够空间（增加以容纳滚动条）
         project_panel.setMinimumWidth(350)
-        # 增加左侧面板最小宽度，确保孔板完整显示（96孔板需要约420像素宽度）
-        left_panel.setMinimumWidth(450)
+        # 增加左侧面板最小宽度，确保孔板完整显示（96孔板需要约550像素宽度）
+        left_panel.setMinimumWidth(600)
         
         # 添加到主布局（第一行）
         main_layout.addWidget(top_splitter, 2)  # 占据2倍空间
         
         # 第二行：结果判读显示区域（单独一行，占据整个宽度）
-        judgment_group = QGroupBox("结果判读")
+        judgment_group = QGroupBox()
         judgment_layout = QVBoxLayout(judgment_group)
+        
+        # 创建标题栏（标题和导出按钮在同一行，紧挨着）
+        title_layout = QHBoxLayout()
+        title_label = QLabel("结果判读")
+        title_label.setStyleSheet("font-weight: bold;")
+        title_layout.addWidget(title_label)
+        # 添加一些间距
+        title_layout.addSpacing(10)
+        self.export_judgment_btn = QPushButton('导出结果')
+        self.export_judgment_btn.clicked.connect(self.export_judgment_results)
+        title_layout.addWidget(self.export_judgment_btn)
+        title_layout.addStretch()  # 让标题和按钮靠左，其余空间在右边
+        judgment_layout.addLayout(title_layout)
         
         # 结果显示表格（列数和列标题会根据选中的项目动态设置）
         self.judgment_table = QTableWidget()
@@ -1096,13 +1109,23 @@ class PCRAnalyzerApp(QMainWindow):
             self.judgment_table.setColumnCount(0)
             return
         
-        # 按字母顺序排序通道
-        valid_channels = sorted(list(all_valid_channels))
+        # 按自定义顺序排序通道：FAM、VIC、ROX、CY5
+        channel_order = ['FAM', 'VIC', 'ROX', 'CY5']
+        # 先按自定义顺序排序，然后添加其他不在列表中的通道（按字母顺序）
+        valid_channels = []
+        for ch in channel_order:
+            if ch in all_valid_channels:
+                valid_channels.append(ch)
+        # 添加其他通道（按字母顺序）
+        remaining_channels = sorted([ch for ch in all_valid_channels if ch not in channel_order])
+        valid_channels.extend(remaining_channels)
         
         # 设置表格列数和列标题
-        column_count = 3 + len(valid_channels) + 1  # Well + 项目名 + 产品编号 + 通道列 + 判读结果
+        column_count = 4 + len(valid_channels) + 1  # Well + 样本 + 项目名 + 产品编号 + 通道列 + 判读结果
         self.judgment_table.setColumnCount(column_count)
-        headers = ['Well', '项目名', '产品编号'] + valid_channels + ['判读结果']
+        # 给每个通道名称添加"(CT)"后缀
+        channel_headers = [f"{ch}(CT)" for ch in valid_channels]
+        headers = ['Well', '样本', '项目名', '产品编号'] + channel_headers + ['判读结果']
         self.judgment_table.setHorizontalHeaderLabels(headers)
         
         # 准备结果数据（每个孔位 × 每个项目）
@@ -1151,9 +1174,13 @@ class PCRAnalyzerApp(QMainWindow):
                 # 获取产品编号
                 project_id = project_config.get('project_id', '')
                 
+                # 获取样本名称
+                sample_name = well.metadata.get('sample_name', '') if well.metadata else ''
+                
                 # 添加到结果中
                 results.append({
                     'well': well_name,
+                    'sample_name': sample_name,
                     'project': project_name,
                     'project_id': project_id,
                     'ct_values': ct_values,
@@ -1168,16 +1195,20 @@ class PCRAnalyzerApp(QMainWindow):
             # Well
             self.judgment_table.setItem(row_idx, 0, QTableWidgetItem(result['well']))
             
+            # 样本名称
+            sample_name = result.get('sample_name', '')
+            self.judgment_table.setItem(row_idx, 1, QTableWidgetItem(str(sample_name) if sample_name else ''))
+            
             # 项目名
-            self.judgment_table.setItem(row_idx, 1, QTableWidgetItem(result['project']))
+            self.judgment_table.setItem(row_idx, 2, QTableWidgetItem(result['project']))
             
             # 产品编号
             project_id = result.get('project_id', '')
-            self.judgment_table.setItem(row_idx, 2, QTableWidgetItem(str(project_id) if project_id else ''))
+            self.judgment_table.setItem(row_idx, 3, QTableWidgetItem(str(project_id) if project_id else ''))
             
             # 各通道CT值（只显示有效通道）
             project_config = result['project_config']
-            for col_idx, ch_name in enumerate(valid_channels, 3):
+            for col_idx, ch_name in enumerate(valid_channels, 4):
                 ct_value = result['ct_values'].get(ch_name)
                 # 如果VIC没有数据，尝试从HEX获取（在显示时也需要处理）
                 if ct_value is None and ch_name == 'VIC':
@@ -1202,7 +1233,7 @@ class PCRAnalyzerApp(QMainWindow):
                     self.judgment_table.setItem(row_idx, col_idx, QTableWidgetItem("N/A"))
             
             # 判读结果（阳性targets）
-            result_col_idx = 3 + len(valid_channels)  # 判读结果列索引
+            result_col_idx = 4 + len(valid_channels)  # 判读结果列索引
             if result['positive_targets']:
                 result_text = ", ".join(result['positive_targets'])
                 item = QTableWidgetItem(result_text)
@@ -1213,6 +1244,63 @@ class PCRAnalyzerApp(QMainWindow):
         
         # 调整列宽
         self.judgment_table.resizeColumnsToContents()
+    
+    def export_judgment_results(self):
+        """导出判读结果到Excel文件"""
+        # 检查表格是否有数据
+        if self.judgment_table.rowCount() == 0:
+            QMessageBox.warning(self, '警告', '没有可导出的数据')
+            return
+        
+        # 使用文件对话框让用户选择保存位置（默认xlsx格式）
+        file_path, _ = QFileDialog.getSaveFileName(
+            self, 
+            '导出判读结果', 
+            '判读结果.xlsx', 
+            'Excel Files (*.xlsx);;All Files (*)'
+        )
+        
+        if not file_path:
+            return  # 用户取消了保存
+        
+        # 确保文件扩展名正确
+        if not file_path.endswith('.xlsx'):
+            file_path += '.xlsx'
+        
+        try:
+            # 提取表格数据
+            data = []
+            headers = []
+            
+            # 获取表头
+            for col in range(self.judgment_table.columnCount()):
+                header_item = self.judgment_table.horizontalHeaderItem(col)
+                if header_item:
+                    headers.append(header_item.text())
+                else:
+                    headers.append(f'列{col+1}')
+            
+            # 获取表格数据
+            for row in range(self.judgment_table.rowCount()):
+                row_data = []
+                for col in range(self.judgment_table.columnCount()):
+                    item = self.judgment_table.item(row, col)
+                    if item:
+                        row_data.append(item.text())
+                    else:
+                        row_data.append('')
+                data.append(row_data)
+            
+            # 创建DataFrame
+            df = pd.DataFrame(data, columns=headers)
+            
+            # 使用openpyxl导出xlsx格式
+            df.to_excel(file_path, index=False, engine='openpyxl')
+            
+            QMessageBox.information(self, '成功', f'判读结果已成功导出到:\n{file_path}')
+            
+        except Exception as e:
+            QMessageBox.critical(self, '错误', f'导出失败:\n{str(e)}')
 
 
 def main():

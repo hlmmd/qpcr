@@ -61,6 +61,13 @@ class VendorAConverter(DataConverter):
                             if not well.cycles:
                                 well.cycles = cycles
                         
+                        # 提取样本名称（如果DataFrame中有SampleName列）
+                        if 'SampleName' in group_df.columns:
+                            sample_names = group_df['SampleName'].dropna()
+                            if len(sample_names) > 0:
+                                # 使用第一个非空样本名称
+                                well.metadata['sample_name'] = str(sample_names.iloc[0])
+                        
                         # 获取扩增值
                         if 'Amplification' in group_df.columns:
                             values = group_df['Amplification'].tolist()
