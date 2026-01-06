@@ -32,12 +32,8 @@ from plate_selector import PlateSelector
 from data_model import PCRDataModel
 from data_converter import ConverterFactory
 
-# 导入项目数据
-try:
-    from projects_data import projects_data, channel_names as project_channel_names
-except ImportError:
-    projects_data = {}
-    project_channel_names = ['FAM', 'VIC', 'CY5', 'ROX']
+# 通道名称列表
+project_channel_names = ['FAM', 'VIC', 'CY5', 'ROX']
 
 
 def load_projects_from_excel(file_path):
@@ -101,11 +97,13 @@ def load_projects_from_excel(file_path):
                     if not is_channel_col and 'TARGET' not in val_str and 'THRESHOLD' not in val_str and '目标' not in val_str and '阈值' not in val_str and '靶标' not in val_str:
                         col_map['project_id'] = i
                 else:
-                    # 检查通道相关列
+                    # 检查通道相关列（更灵活的匹配）
                     for ch in channels:
                         if ch in val_str:
+                            # 检查是否是target列
                             if 'TARGET' in val_str or '目标' in val_str or '靶标' in val_str:
                                 col_map[f'{ch}_target'] = i
+                            # 检查是否是threshold列
                             elif 'THRESHOLD' in val_str or '阈值' in val_str or 'TH' in val_str:
                                 col_map[f'{ch}_threshold'] = i
         
@@ -126,17 +124,54 @@ def load_projects_from_excel(file_path):
                         # 排除target和threshold相关的列
                         if not is_channel_col and 'TARGET' not in val_str and 'THRESHOLD' not in val_str and '目标' not in val_str and '阈值' not in val_str and '靶标' not in val_str:
                             col_map['project_id'] = i
-                            # 如果找到了项目编号列，更新header_row，使数据从下一行开始读取
-                            # 但这里不更新header_row，因为项目名称可能还在上一行
                             break
+            
+            # 也检查下一行中的通道相关列（可能是多行表头，通道名在第一行，target/threshold在第二行）
+            for i, val in enumerate(next_header):
+                if pd.notna(val):
+                    val_str = str(val).upper()
+                    # 检查是否是target或threshold列（不包含通道名，可能是第二行表头）
+                    if 'TARGET' in val_str or '目标' in val_str or '靶标' in val_str:
+                        # 查找对应的通道（通过列位置推断，或者检查上一行对应位置）
+                        if i < len(header):
+                            prev_val = header[i] if pd.notna(header[i]) else ''
+                            prev_val_str = str(prev_val).upper()
+                            for ch in channels:
+                                if ch in prev_val_str:
+                                    if f'{ch}_target' not in col_map:
+                                        col_map[f'{ch}_target'] = i
+                                    break
+                    elif 'THRESHOLD' in val_str or '阈值' in val_str or 'TH' in val_str:
+                        # 查找对应的通道
+                        if i < len(header):
+                            prev_val = header[i] if pd.notna(header[i]) else ''
+                            prev_val_str = str(prev_val).upper()
+                            for ch in channels:
+                                if ch in prev_val_str:
+                                    if f'{ch}_threshold' not in col_map:
+                                        col_map[f'{ch}_threshold'] = i
+                                    break
         
-        # 如果找不到列映射，尝试按位置推断（假设固定格式）
-        if not col_map:
-            # 假设格式：项目名称, project_id, FAM_target, FAM_threshold, VIC_target, VIC_threshold, ...
-            col_map = {'project_name': 0, 'project_id': 1}
-            for i, ch in enumerate(channels):
-                col_map[f'{ch}_target'] = 2 + i * 2
-                col_map[f'{ch}_threshold'] = 3 + i * 2
+        # 如果找不到通道列映射，尝试按位置推断
+        # 检查是否所有通道的target和threshold都没有找到
+        missing_channels = []
+        for ch in channels:
+            if f'{ch}_target' not in col_map or f'{ch}_threshold' not in col_map:
+                missing_channels.append(ch)
+        
+        if missing_channels:
+            # 根据实际数据格式推断：
+            # 列2-5: FAM, VIC, CY5, ROX 的target（目标）
+            # 列6-9: FAM, VIC, CY5, ROX 的threshold（阈值）
+            if 'project_name' in col_map and 'project_id' in col_map:
+                # 从列2开始是target，列6开始是threshold
+                target_start_col = 2
+                threshold_start_col = 6
+                for i, ch in enumerate(missing_channels):
+                    if f'{ch}_target' not in col_map:
+                        col_map[f'{ch}_target'] = target_start_col + i
+                    if f'{ch}_threshold' not in col_map:
+                        col_map[f'{ch}_threshold'] = threshold_start_col + i
         
         # 确定数据起始行：如果项目编号列在下一行找到，数据从header_row+2开始，否则从header_row+1开始
         data_start_row = header_row + 1
@@ -223,17 +258,8 @@ def get_base_directory():
 
 
 def load_projects_data():
-    """加载项目数据，优先从目录下的projects.xls或projects.xlsx读取"""
-    # 默认项目数据
-    default_projects = {}
+    """加载项目数据，从目录下的projects.xls或projects.xlsx读取，如果不存在则返回空"""
     default_channels = ['FAM', 'VIC', 'CY5', 'ROX']
-    
-    try:
-        from projects_data import projects_data, channel_names as project_channel_names
-        default_projects = projects_data
-        default_channels = project_channel_names
-    except ImportError:
-        pass
     
     # 尝试从目录下的文件读取
     base_dir = get_base_directory()
@@ -248,38 +274,12 @@ def load_projects_data():
                 loaded_projects = load_projects_from_excel(str(file_path))
                 if loaded_projects:
                     print(f"从 {file_path.name} 加载了 {len(loaded_projects)} 个项目")
-                    # 直接使用Excel数据，完全替换默认数据
-                    # 如果Excel中某个项目的通道配置不完整，从默认数据中补充
-                    import copy
-                    merged_projects = {}
-                    for project_name, excel_config in loaded_projects.items():
-                        # 深拷贝Excel配置
-                        merged_projects[project_name] = copy.deepcopy(excel_config)
-                        
-                        # 如果Excel中缺少某些通道的配置，从默认数据中补充
-                        if project_name in default_projects:
-                            default_config = default_projects[project_name]
-                            for ch in default_channels:
-                                # 如果Excel中没有该通道的配置，使用默认值
-                                if ch not in merged_projects[project_name] or not merged_projects[project_name][ch]:
-                                    if ch in default_config:
-                                        merged_projects[project_name][ch] = copy.deepcopy(default_config[ch])
-                                    else:
-                                        merged_projects[project_name][ch] = {}
-                                # 如果Excel中有该通道但缺少某些字段，从默认值补充
-                                elif ch in default_config:
-                                    default_ch_config = default_config[ch]
-                                    if 'target' not in merged_projects[project_name][ch] and 'target' in default_ch_config:
-                                        merged_projects[project_name][ch]['target'] = default_ch_config['target']
-                                    if 'threshold' not in merged_projects[project_name][ch] and 'threshold' in default_ch_config:
-                                        merged_projects[project_name][ch]['threshold'] = default_ch_config['threshold']
-                    
-                    return merged_projects, default_channels
+                    return loaded_projects, default_channels
             except Exception as e:
                 print(f"读取 {file_path.name} 失败: {e}")
     
-    # 如果没有找到文件或读取失败，返回默认值
-    return default_projects, default_channels
+    # 如果没有找到文件或读取失败，返回空字典（不显示项目）
+    return {}, default_channels
 
 
 class PCRAnalyzerApp(QMainWindow):
@@ -987,40 +987,8 @@ class PCRAnalyzerApp(QMainWindow):
             try:
                 loaded_projects = load_projects_from_excel(file_path)
                 if loaded_projects:
-                    # 直接使用Excel数据，完全替换现有数据
-                    # 如果Excel中某个项目的通道配置不完整，从默认数据中补充
-                    try:
-                        from projects_data import projects_data as default_projects_data
-                    except ImportError:
-                        default_projects_data = {}
-                    
-                    # 直接使用Excel数据作为基础
-                    merged_projects = {}
-                    for project_name, excel_config in loaded_projects.items():
-                        # 深拷贝Excel配置
-                        import copy
-                        merged_projects[project_name] = copy.deepcopy(excel_config)
-                        
-                        # 如果Excel中缺少某些通道的配置，从默认数据中补充
-                        if project_name in default_projects_data:
-                            default_config = default_projects_data[project_name]
-                            for ch in self.project_channel_names:
-                                # 如果Excel中没有该通道的配置，使用默认值
-                                if ch not in merged_projects[project_name] or not merged_projects[project_name][ch]:
-                                    if ch in default_config:
-                                        merged_projects[project_name][ch] = copy.deepcopy(default_config[ch])
-                                    else:
-                                        merged_projects[project_name][ch] = {}
-                                # 如果Excel中有该通道但缺少某些字段，从默认值补充
-                                elif ch in default_config:
-                                    default_ch_config = default_config[ch]
-                                    if 'target' not in merged_projects[project_name][ch] and 'target' in default_ch_config:
-                                        merged_projects[project_name][ch]['target'] = default_ch_config['target']
-                                    if 'threshold' not in merged_projects[project_name][ch] and 'threshold' in default_ch_config:
-                                        merged_projects[project_name][ch]['threshold'] = default_ch_config['threshold']
-                    
-                    # 更新项目数据（完全使用Excel数据）
-                    self.projects_data = merged_projects
+                    # 直接使用Excel数据
+                    self.projects_data = loaded_projects
                     # 刷新项目列表
                     self.refresh_project_list()
                     # 清空当前选择
@@ -1064,11 +1032,6 @@ class PCRAnalyzerApp(QMainWindow):
             self.judgment_table.setItem(0, 0, QTableWidgetItem("请先打开Excel文件"))
             return
         
-        if not self.selected_projects:
-            # 如果没有选择项目，清空表格
-            self.judgment_table.setRowCount(0)
-            return
-        
         # 获取在孔板中选择的孔位
         selected_wells = self.plate_selector.get_selected_wells()
         
@@ -1083,30 +1046,42 @@ class PCRAnalyzerApp(QMainWindow):
             self.judgment_table.setRowCount(0)
             return
         
+        # 如果没有选择项目，不显示判读结果
+        if not self.selected_projects:
+            self.judgment_table.setRowCount(0)
+            self.judgment_table.setColumnCount(0)
+            return
+        
         # 收集所有项目的有效通道（合并所有项目的通道）
         all_valid_channels = set()
         projects_configs = {}
         
+        # 如果有选择项目，使用项目配置来确定有效通道
         for project_name in self.selected_projects:
             if project_name not in self.projects_data:
+                # 如果项目不在数据中，跳过该项目
+                print(f"警告: 项目 '{project_name}' 不在项目数据中")
                 continue
             
             project_config = self.projects_data[project_name]
             projects_configs[project_name] = project_config
             
-            # 筛选出有target的通道
+            # 筛选出有配置的通道（只要通道存在于项目配置中，就显示该通道的CT值）
             for ch_name in self.project_channel_names:
                 if ch_name in project_config:
-                    ch_config = project_config[ch_name]
-                    target = ch_config.get('target', '')
-                    # 只包含有target且target不为空的通道
-                    if target and target.strip() and target.strip() != '\\' and target.strip() != '/':
-                        all_valid_channels.add(ch_name)
+                    # 只要通道存在于项目配置中，就添加该通道（即使没有target或threshold）
+                    all_valid_channels.add(ch_name)
         
-        # 如果没有有效通道，清空表格
+        # 如果没有有效通道，清空表格并显示提示
         if not all_valid_channels:
             self.judgment_table.setRowCount(0)
-            self.judgment_table.setColumnCount(0)
+            self.judgment_table.setColumnCount(1)
+            self.judgment_table.setHorizontalHeaderLabels(['提示'])
+            self.judgment_table.setRowCount(1)
+            if not projects_configs:
+                self.judgment_table.setItem(0, 0, QTableWidgetItem("所选项目不在项目数据中，请先导入项目"))
+            else:
+                self.judgment_table.setItem(0, 0, QTableWidgetItem("所选项目没有有效的通道配置"))
             return
         
         # 按自定义顺序排序通道：FAM、VIC、ROX、CY5
@@ -1131,6 +1106,14 @@ class PCRAnalyzerApp(QMainWindow):
         # 准备结果数据（每个孔位 × 每个项目）
         results = []
         
+        def get_ct_value(well, channel_name):
+            """获取通道的CT值，VIC和HEX等价，如果VIC没有数据则取HEX的数据"""
+            ct_value = well.ct_values.get(channel_name, None)
+            # 如果VIC没有数据，尝试从HEX获取
+            if channel_name == 'VIC' and ct_value is None:
+                ct_value = well.ct_values.get('HEX', None)
+            return ct_value
+        
         for well_name in sorted(all_wells):
             well = self.data_model.get_well(well_name)
             if not well:
@@ -1147,17 +1130,9 @@ class PCRAnalyzerApp(QMainWindow):
                 ct_values = {}
                 positive_targets = []
                 
-                def get_ct_value(channel_name):
-                    """获取通道的CT值，VIC和HEX等价，如果VIC没有数据则取HEX的数据"""
-                    ct_value = well.ct_values.get(channel_name, None)
-                    # 如果VIC没有数据，尝试从HEX获取
-                    if channel_name == 'VIC' and ct_value is None:
-                        ct_value = well.ct_values.get('HEX', None)
-                    return ct_value
-                
                 for ch_name in valid_channels:
                     # 获取CT值（VIC和HEX等价）
-                    ct_value = get_ct_value(ch_name)
+                    ct_value = get_ct_value(well, ch_name)
                     ct_values[ch_name] = ct_value
                     
                     # 判断是否阳性（只判断当前项目配置中包含的通道）
@@ -1169,7 +1144,10 @@ class PCRAnalyzerApp(QMainWindow):
                         if ct_value is not None and threshold is not None:
                             # CT值小于阈值则为阳性（CT值越小，扩增越早，越可能是阳性）
                             if ct_value < threshold:
-                                positive_targets.append(target if target else ch_name)
+                                # 只添加有效的target，过滤掉空值、"\"、"/"等无效target
+                                if target and target.strip() and target.strip() != '\\' and target.strip() != '/':
+                                    positive_targets.append(target)
+                                # 如果target无效，不添加到列表中（不显示通道名）
                 
                 # 获取产品编号
                 project_id = project_config.get('project_id', '')
@@ -1228,14 +1206,18 @@ class PCRAnalyzerApp(QMainWindow):
                             item.setBackground(QColor(255, 200, 200))  # 浅红色 - 阳性
                         else:
                             item.setBackground(QColor(200, 255, 200))  # 浅绿色 - 阴性
+                    # 如果没有项目配置，不设置背景色（显示默认颜色）
                     self.judgment_table.setItem(row_idx, col_idx, item)
                 else:
                     self.judgment_table.setItem(row_idx, col_idx, QTableWidgetItem("N/A"))
             
             # 判读结果（阳性targets）
             result_col_idx = 4 + len(valid_channels)  # 判读结果列索引
-            if result['positive_targets']:
-                result_text = ", ".join(result['positive_targets'])
+            # 过滤掉无效的target（如"\"、"/"等）
+            valid_positive_targets = [t for t in result['positive_targets'] 
+                                     if t and t.strip() and t.strip() != '\\' and t.strip() != '/']
+            if valid_positive_targets:
+                result_text = ", ".join(valid_positive_targets)
                 item = QTableWidgetItem(result_text)
                 item.setBackground(QColor(255, 200, 200))  # 浅红色
                 self.judgment_table.setItem(row_idx, result_col_idx, item)
