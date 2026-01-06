@@ -63,7 +63,7 @@ def load_projects_from_excel(file_path):
         projects = {}
         channels = ['FAM', 'VIC', 'CY5', 'ROX']
         
-        # 查找表头行
+        # 查找表头行（可能有多行表头）
         header_row = None
         for idx, row in df.iterrows():
             row_str = ' '.join([str(x).upper() for x in row if pd.notna(x)])
@@ -76,6 +76,7 @@ def load_projects_from_excel(file_path):
             header_row = 0
         
         # 读取表头，确定列索引
+        # 先读取主表头行
         header = df.iloc[header_row].values
         
         # 查找各列的索引
@@ -83,17 +84,51 @@ def load_projects_from_excel(file_path):
         for i, val in enumerate(header):
             if pd.notna(val):
                 val_str = str(val).upper()
+                # 先检查是否是项目名称列
                 if '项目' in val_str or 'PROJECT' in val_str or 'NAME' in val_str:
-                    col_map['project_name'] = i
-                elif 'ID' in val_str and 'PROJECT' in val_str:
-                    col_map['project_id'] = i
+                    # 如果已经包含"编号"或"ID"，可能是项目编号列而不是名称列
+                    if '编号' not in val_str and 'ID' not in val_str:
+                        col_map['project_name'] = i
+                # 检查是否是项目编号列（更宽松的条件）
+                elif ('编号' in val_str or 'ID' in val_str) and 'project_id' not in col_map:
+                    # 排除通道相关的列（FAM, VIC, CY5, ROX等）
+                    is_channel_col = False
+                    for ch in channels:
+                        if ch in val_str:
+                            is_channel_col = True
+                            break
+                    # 排除target和threshold相关的列
+                    if not is_channel_col and 'TARGET' not in val_str and 'THRESHOLD' not in val_str and '目标' not in val_str and '阈值' not in val_str and '靶标' not in val_str:
+                        col_map['project_id'] = i
                 else:
+                    # 检查通道相关列
                     for ch in channels:
                         if ch in val_str:
                             if 'TARGET' in val_str or '目标' in val_str or '靶标' in val_str:
                                 col_map[f'{ch}_target'] = i
                             elif 'THRESHOLD' in val_str or '阈值' in val_str or 'TH' in val_str:
                                 col_map[f'{ch}_threshold'] = i
+        
+        # 如果主表头行没有找到项目编号列，检查下一行（可能是多行表头）
+        if 'project_id' not in col_map and header_row + 1 < len(df):
+            next_header = df.iloc[header_row + 1].values
+            for i, val in enumerate(next_header):
+                if pd.notna(val):
+                    val_str = str(val).upper()
+                    # 检查是否是项目编号列
+                    if ('编号' in val_str or 'ID' in val_str or '产品' in val_str) and 'project_id' not in col_map:
+                        # 排除通道相关的列
+                        is_channel_col = False
+                        for ch in channels:
+                            if ch in val_str:
+                                is_channel_col = True
+                                break
+                        # 排除target和threshold相关的列
+                        if not is_channel_col and 'TARGET' not in val_str and 'THRESHOLD' not in val_str and '目标' not in val_str and '阈值' not in val_str and '靶标' not in val_str:
+                            col_map['project_id'] = i
+                            # 如果找到了项目编号列，更新header_row，使数据从下一行开始读取
+                            # 但这里不更新header_row，因为项目名称可能还在上一行
+                            break
         
         # 如果找不到列映射，尝试按位置推断（假设固定格式）
         if not col_map:
@@ -103,8 +138,22 @@ def load_projects_from_excel(file_path):
                 col_map[f'{ch}_target'] = 2 + i * 2
                 col_map[f'{ch}_threshold'] = 3 + i * 2
         
+        # 确定数据起始行：如果项目编号列在下一行找到，数据从header_row+2开始，否则从header_row+1开始
+        data_start_row = header_row + 1
+        if 'project_id' in col_map:
+            # 检查项目编号列是否在下一行（多行表头的情况）
+            if header_row + 1 < len(df):
+                next_header = df.iloc[header_row + 1].values
+                if col_map['project_id'] < len(next_header):
+                    next_val = next_header[col_map['project_id']]
+                    if pd.notna(next_val):
+                        val_str = str(next_val).upper()
+                        # 如果下一行对应位置有值且包含"编号"或"产品"，说明是表头的一部分
+                        if '编号' in val_str or 'ID' in val_str or '产品' in val_str:
+                            data_start_row = header_row + 2
+        
         # 读取数据行
-        for idx in range(header_row + 1, len(df)):
+        for idx in range(data_start_row, len(df)):
             row = df.iloc[idx]
             
             # 获取项目名称
