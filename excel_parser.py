@@ -16,6 +16,7 @@ class ExcelParser:
         self.parsers = {
             'default': DefaultParser(),
             'vendor_a': VendorAParser(),
+            'vendor_7500': Vendor7500Parser(),
         }
         
         # 尝试导入VendorBParser（如果存在）
@@ -36,8 +37,27 @@ class ExcelParser:
     
     def detect_vendor(self, file_path):
         """检测Excel文件的厂商格式"""
-        wb = openpyxl.load_workbook(file_path)
-        sheet_names = wb.sheetnames
+        # 对于.xls文件，使用xlrd读取工作表名
+        file_ext = Path(file_path).suffix.lower()
+        if file_ext == '.xls':
+            try:
+                import xlrd
+                wb = xlrd.open_workbook(file_path)
+                sheet_names = wb.sheet_names()  # 调用方法
+            except:
+                # 如果xlrd不可用，尝试用openpyxl（可能失败）
+                try:
+                    wb = openpyxl.load_workbook(file_path)
+                    sheet_names = wb.sheetnames
+                except:
+                    return 'default'
+        else:
+            wb = openpyxl.load_workbook(file_path)
+            sheet_names = wb.sheetnames
+        
+        # 检测7500格式（包含'Amplification Data', 'Results', 'Raw Data'等工作表）
+        if any(name in sheet_names for name in ['Amplification Data', 'Results', 'Raw Data', 'Sample Setup']):
+            return 'vendor_7500'
         
         # 根据工作表名称和内容特征识别
         if any('实验数据' in name or '扩增曲线' in name for name in sheet_names):
@@ -654,5 +674,425 @@ class VendorAParser(BaseParser):
             print(f"提取到 {len(result_df)} 行原始数据")
             return result_df
         
+        return pd.DataFrame()
+
+
+class Vendor7500Parser(BaseParser):
+    """7500格式解析器（Applied Biosystems 7500）"""
+    
+    def parse(self, file_path):
+        """解析7500格式的Excel文件"""
+        result = {
+            'sheets': {},
+            'experiment_info': {},
+            'amplification_data': pd.DataFrame(),
+            'raw_data': pd.DataFrame(),
+            'well_data': {}
+        }
+        
+        # 根据文件扩展名选择引擎
+        file_ext = Path(file_path).suffix.lower()
+        if file_ext == '.xls':
+            engine = 'xlrd'
+        else:
+            engine = 'openpyxl'
+        
+        # 解析Sample Setup工作表
+        if self._sheet_exists(file_path, 'Sample Setup', engine):
+            df_setup = pd.read_excel(file_path, sheet_name='Sample Setup', header=None, engine=engine)
+            result['sheets']['Sample Setup'] = df_setup
+            result['experiment_info'] = self.extract_experiment_info(df_setup)
+            result['well_data'] = self.extract_well_data_from_setup(df_setup)
+        
+        # 解析Amplification Data工作表
+        if self._sheet_exists(file_path, 'Amplification Data', engine):
+            df_amp = pd.read_excel(file_path, sheet_name='Amplification Data', header=None, engine=engine)
+            result['sheets']['Amplification Data'] = df_amp
+            result['amplification_data'] = self.extract_amplification_data(df_amp)
+        
+        # 解析Results工作表（获取Ct值）
+        if self._sheet_exists(file_path, 'Results', engine):
+            df_results = pd.read_excel(file_path, sheet_name='Results', header=None, engine=engine)
+            result['sheets']['Results'] = df_results
+            # 从Results中提取Ct值并更新到well_data
+            ct_data = self.extract_ct_from_results(df_results)
+            for well_name, channel_ct in ct_data.items():
+                if well_name not in result['well_data']:
+                    result['well_data'][well_name] = {}
+                result['well_data'][well_name].update(channel_ct)
+        
+        # 解析Raw Data工作表
+        if self._sheet_exists(file_path, 'Raw Data', engine):
+            df_raw = pd.read_excel(file_path, sheet_name='Raw Data', header=None, engine=engine)
+            result['sheets']['Raw Data'] = df_raw
+            result['raw_data'] = self.extract_raw_data(df_raw)
+        
+        return result
+    
+    def _sheet_exists(self, file_path, sheet_name, engine):
+        """检查工作表是否存在"""
+        try:
+            if engine == 'xlrd':
+                import xlrd
+                wb = xlrd.open_workbook(file_path)
+                return sheet_name in wb.sheet_names()  # 调用方法
+            else:
+                wb = openpyxl.load_workbook(file_path)
+                return sheet_name in wb.sheetnames
+        except:
+            return False
+    
+    def extract_experiment_info(self, df):
+        """提取实验信息"""
+        info = {}
+        
+        # 查找关键信息（前7行）
+        for idx in range(min(7, len(df))):
+            row = df.iloc[idx]
+            if len(row) > 0 and pd.notna(row.iloc[0]):
+                key = str(row.iloc[0]).strip()
+                if len(row) > 1 and pd.notna(row.iloc[1]):
+                    value = str(row.iloc[1]).strip()
+                    if key and value:
+                        info[key] = value
+        
+        return info
+    
+    def extract_well_data_from_setup(self, df):
+        """从Sample Setup工作表提取孔位和通道信息"""
+        well_data = {}
+        
+        # 查找表头行（通常是第7行，索引7）
+        header_row = None
+        for idx in range(min(10, len(df))):
+            row = df.iloc[idx]
+            row_str = ' '.join([str(x) for x in row if pd.notna(x)])
+            if 'Well' in row_str and 'Target Name' in row_str:
+                header_row = idx
+                break
+        
+        if header_row is None:
+            return well_data
+        
+        # 确定列索引
+        header = df.iloc[header_row]
+        well_col = None
+        target_col = None
+        sample_name_col = None
+        
+        for i, val in enumerate(header):
+            if pd.notna(val):
+                val_str = str(val).strip()
+                if val_str == 'Well':
+                    well_col = i
+                elif val_str == 'Target Name':
+                    target_col = i
+                elif val_str == 'Sample Name':
+                    sample_name_col = i
+        
+        if well_col is None or target_col is None:
+            return well_data
+        
+        # 提取数据（从表头行之后开始）
+        for idx in range(header_row + 1, len(df)):
+            row = df.iloc[idx]
+            
+            # 获取孔位
+            if well_col < len(row) and pd.notna(row.iloc[well_col]):
+                well_name = str(row.iloc[well_col]).strip()
+                if re.match(r'^[A-H][0-9]{1,2}$', well_name, re.IGNORECASE):
+                    well_name = well_name.upper()
+                    
+                    # 获取通道名（Target Name）
+                    if target_col < len(row) and pd.notna(row.iloc[target_col]):
+                        target_name = str(row.iloc[target_col]).strip()
+                        
+                        # 映射通道名（HEX -> VIC, JOE -> VIC）
+                        if target_name == 'HEX' or target_name == 'JOE':
+                            channel_name = 'VIC'
+                        else:
+                            channel_name = target_name
+                        
+                        # 获取样本名称
+                        sample_name = None
+                        if sample_name_col is not None and sample_name_col < len(row):
+                            sample_val = row.iloc[sample_name_col]
+                            if pd.notna(sample_val):
+                                sample_name = str(sample_val).strip()
+                        
+                        if well_name not in well_data:
+                            well_data[well_name] = {}
+                        
+                        if 'channels' not in well_data[well_name]:
+                            well_data[well_name]['channels'] = []
+                        
+                        if channel_name not in well_data[well_name]['channels']:
+                            well_data[well_name]['channels'].append(channel_name)
+                        
+                        if sample_name and 'sample_name' not in well_data[well_name]:
+                            well_data[well_name]['sample_name'] = sample_name
+        
+        return well_data
+    
+    def extract_amplification_data(self, df):
+        """从Amplification Data工作表提取扩增数据"""
+        # 查找表头行（通常是第7行，索引7）
+        header_row = None
+        for idx in range(min(10, len(df))):
+            row = df.iloc[idx]
+            row_str = ' '.join([str(x) for x in row if pd.notna(x)])
+            if 'Well' in row_str and 'Cycle' in row_str:
+                header_row = idx
+                break
+        
+        if header_row is None:
+            return pd.DataFrame()
+        
+        # 确定列索引
+        header = df.iloc[header_row]
+        well_col = None
+        cycle_col = None
+        target_col = None
+        rn_col = None
+        delta_rn_col = None
+        
+        for i, val in enumerate(header):
+            if pd.notna(val):
+                val_str = str(val).strip()
+                if val_str == 'Well':
+                    well_col = i
+                elif val_str == 'Cycle':
+                    cycle_col = i
+                elif val_str == 'Target Name':
+                    target_col = i
+                elif val_str == 'Rn' or val_str == 'Rn':
+                    rn_col = i
+                elif 'ΔRn' in val_str or 'Delta Rn' in val_str or 'dRn' in val_str:
+                    delta_rn_col = i
+        
+        if well_col is None or cycle_col is None:
+            return pd.DataFrame()
+        
+        # 提取数据
+        data_rows = []
+        for idx in range(header_row + 1, len(df)):
+            row = df.iloc[idx]
+            
+            # 获取孔位
+            if well_col >= len(row) or pd.isna(row.iloc[well_col]):
+                continue
+            
+            well_name = str(row.iloc[well_col]).strip()
+            if not re.match(r'^[A-H][0-9]{1,2}$', well_name, re.IGNORECASE):
+                continue
+            well_name = well_name.upper()
+            
+            # 获取循环数
+            if cycle_col >= len(row) or pd.isna(row.iloc[cycle_col]):
+                continue
+            
+            try:
+                cycle = int(float(row.iloc[cycle_col]))
+            except:
+                continue
+            
+            # 获取通道名
+            channel_name = None
+            if target_col is not None and target_col < len(row) and pd.notna(row.iloc[target_col]):
+                target_name = str(row.iloc[target_col]).strip()
+                # 映射通道名
+                if target_name == 'HEX' or target_name == 'JOE':
+                    channel_name = 'VIC'
+                else:
+                    channel_name = target_name
+            
+            if not channel_name:
+                continue
+            
+            # 获取扩增值（优先使用ΔRn，如果没有则使用Rn）
+            amp_value = None
+            if delta_rn_col is not None and delta_rn_col < len(row) and pd.notna(row.iloc[delta_rn_col]):
+                try:
+                    amp_value = float(row.iloc[delta_rn_col])
+                except:
+                    pass
+            
+            if amp_value is None and rn_col is not None and rn_col < len(row) and pd.notna(row.iloc[rn_col]):
+                try:
+                    amp_value = float(row.iloc[rn_col])
+                except:
+                    pass
+            
+            if amp_value is not None:
+                data_rows.append({
+                    'Cycle': cycle,
+                    'Well': well_name,
+                    'Channel': channel_name,
+                    'Amplification': amp_value
+                })
+        
+        if data_rows:
+            return pd.DataFrame(data_rows)
+        return pd.DataFrame()
+    
+    def extract_ct_from_results(self, df):
+        """从Results工作表提取Ct值"""
+        ct_data = {}
+        
+        # 查找表头行（通常是第7行，索引7）
+        header_row = None
+        for idx in range(min(10, len(df))):
+            row = df.iloc[idx]
+            row_str = ' '.join([str(x) for x in row if pd.notna(x)])
+            if 'Well' in row_str and 'Target Name' in row_str:
+                header_row = idx
+                break
+        
+        if header_row is None:
+            return ct_data
+        
+        # 确定列索引
+        header = df.iloc[header_row]
+        well_col = None
+        target_col = None
+        ct_col = None
+        
+        for i, val in enumerate(header):
+            if pd.notna(val):
+                val_str = str(val).strip()
+                if val_str == 'Well':
+                    well_col = i
+                elif val_str == 'Target Name':
+                    target_col = i
+                # 对于7500格式，Ct值列固定在第6列（G列，索引6），不通过列名匹配
+                # 因为列名可能有编码问题
+        
+        # 对于7500格式，Ct值列固定在第6列（G列，索引6）
+        if len(header) > 6:
+            ct_col = 6  # G列，索引6
+            print(f"使用7500格式标准Ct值列位置: 列6 (G列)")
+        else:
+            print(f"警告: 表头列数不足，无法使用列6")
+            return ct_data
+        
+        if well_col is None or target_col is None:
+            print(f"警告: 未找到必要的列 - well_col: {well_col}, target_col: {target_col}, ct_col: {ct_col}")
+            print(f"表头内容: {[str(x) for x in header if pd.notna(x)]}")
+            return ct_data
+        
+        print(f"找到列索引 - well_col: {well_col}, target_col: {target_col}, ct_col: {ct_col}")
+        
+        # 提取数据
+        ct_count = 0
+        for idx in range(header_row + 1, len(df)):
+            row = df.iloc[idx]
+            
+            # 获取孔位
+            if well_col >= len(row) or pd.isna(row.iloc[well_col]):
+                continue
+            
+            well_name = str(row.iloc[well_col]).strip()
+            if not re.match(r'^[A-H][0-9]{1,2}$', well_name, re.IGNORECASE):
+                continue
+            well_name = well_name.upper()
+            
+            # 获取通道名
+            if target_col >= len(row) or pd.isna(row.iloc[target_col]):
+                continue
+            
+            target_name = str(row.iloc[target_col]).strip()
+            # 映射通道名
+            if target_name == 'HEX' or target_name == 'JOE':
+                channel_name = 'VIC'
+            else:
+                channel_name = target_name
+            
+            # 获取Ct值（从第6列，G列）
+            if ct_col < len(row) and pd.notna(row.iloc[ct_col]):
+                ct_val = row.iloc[ct_col]
+                # 处理"Undetermined"、"N"、"N/A"等特殊值
+                if isinstance(ct_val, str):
+                    ct_val_str = ct_val.strip().upper()
+                    if ct_val_str in ['UNDETERMINED', 'N/A', 'N', 'NA', '']:
+                        continue
+                
+                try:
+                    ct_value = float(ct_val)
+                    if 0 < ct_value < 50:  # 合理的Ct值范围
+                        if well_name not in ct_data:
+                            ct_data[well_name] = {}
+                        ct_data[well_name][channel_name] = ct_value
+                        ct_count += 1
+                except Exception as e:
+                    # 调试信息：打印无法转换的值（只打印前几个）
+                    if ct_count < 3:
+                        print(f"无法转换Ct值: 孔位={well_name}, 通道={channel_name}, 列={ct_col}, 值={repr(ct_val)}, 类型={type(ct_val)}, 错误={e}")
+        
+        print(f"从Results工作表提取了 {ct_count} 个Ct值")
+        return ct_data
+    
+    def extract_raw_data(self, df):
+        """从Raw Data工作表提取原始数据"""
+        # 查找表头行（通常是第7行，索引7）
+        header_row = None
+        for idx in range(min(10, len(df))):
+            row = df.iloc[idx]
+            row_str = ' '.join([str(x) for x in row if pd.notna(x)])
+            if 'Well' in row_str and 'Cycle' in row_str:
+                header_row = idx
+                break
+        
+        if header_row is None:
+            return pd.DataFrame()
+        
+        # 确定列索引
+        header = df.iloc[header_row]
+        well_col = None
+        cycle_col = None
+        
+        for i, val in enumerate(header):
+            if pd.notna(val):
+                val_str = str(val).strip()
+                if val_str == 'Well':
+                    well_col = i
+                elif val_str == 'Cycle':
+                    cycle_col = i
+        
+        if well_col is None or cycle_col is None:
+            return pd.DataFrame()
+        
+        # 确定通道列（从cycle_col之后开始，每列是一个通道的原始值）
+        # 需要从Sample Setup获取通道信息，这里简化处理，假设列顺序对应通道
+        # 实际应该从Sample Setup获取每个孔位的通道配置
+        
+        # 提取数据
+        data_rows = []
+        for idx in range(header_row + 1, len(df)):
+            row = df.iloc[idx]
+            
+            # 获取孔位
+            if well_col >= len(row) or pd.isna(row.iloc[well_col]):
+                continue
+            
+            well_name = str(row.iloc[well_col]).strip()
+            if not re.match(r'^[A-H][0-9]{1,2}$', well_name, re.IGNORECASE):
+                continue
+            well_name = well_name.upper()
+            
+            # 获取循环数
+            if cycle_col >= len(row) or pd.isna(row.iloc[cycle_col]):
+                continue
+            
+            try:
+                cycle = int(float(row.iloc[cycle_col]))
+            except:
+                continue
+            
+            # 从cycle_col之后开始，每列是一个通道的原始值
+            # 这里需要知道通道顺序，暂时跳过，因为Raw Data的格式比较复杂
+            # 可以根据需要后续完善
+        
+        if data_rows:
+            return pd.DataFrame(data_rows)
         return pd.DataFrame()
 

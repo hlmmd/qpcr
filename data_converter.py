@@ -207,6 +207,82 @@ class DefaultConverter(DataConverter):
         return model
 
 
+class Vendor7500Converter(DataConverter):
+    """7500格式转换器"""
+    
+    def convert(self, parsed_data: Dict) -> PCRDataModel:
+        """转换7500格式数据"""
+        model = PCRDataModel()
+        model.experiment_info = parsed_data.get('experiment_info', {})
+        model.plate_type = "96"
+        
+        # 从扩增数据中提取
+        if 'amplification_data' in parsed_data:
+            df = parsed_data['amplification_data']
+            if not df.empty and 'Well' in df.columns and 'Channel' in df.columns:
+                # 按孔位和通道分组
+                for (well_name, channel_name), group_df in df.groupby(['Well', 'Channel']):
+                    if pd.isna(well_name) or pd.isna(channel_name):
+                        continue
+                    
+                    well_name = str(well_name).strip()
+                    channel_name = str(channel_name).strip()
+                    
+                    # 跳过列名
+                    if channel_name in ['Well', 'Channel', 'Amplification', 'Value', 'Cycle', 'RawValue']:
+                        continue
+                    
+                    # 获取或创建孔位数据
+                    if well_name not in model.wells:
+                        well = WellData(well_name=well_name)
+                        model.add_well(well)
+                    else:
+                        well = model.get_well(well_name)
+                    
+                    # 添加通道数据
+                    if 'Cycle' in group_df.columns:
+                        group_df = group_df.sort_values('Cycle')
+                        cycles = group_df['Cycle'].tolist()
+                        if not well.cycles:
+                            well.cycles = cycles
+                    
+                    # 从well_data中获取样本名称
+                    well_data_map = parsed_data.get('well_data', {})
+                    if well_name in well_data_map and 'sample_name' in well_data_map[well_name]:
+                        well.metadata['sample_name'] = well_data_map[well_name]['sample_name']
+                    
+                    # 获取扩增值
+                    if 'Amplification' in group_df.columns:
+                        values = group_df['Amplification'].tolist()
+                    else:
+                        continue
+                    
+                    # 过滤NaN并确保长度正确
+                    values = [v if pd.notna(v) else 0.0 for v in values]
+                    if well.cycles and len(values) != len(well.cycles):
+                        if len(values) > len(well.cycles):
+                            values = values[:len(well.cycles)]
+                        else:
+                            values.extend([0.0] * (len(well.cycles) - len(values)))
+                    
+                    well.channels[channel_name] = values
+                    
+                    # 从well_data中获取Ct值
+                    if well_name in well_data_map:
+                        well_info = well_data_map[well_name]
+                        if isinstance(well_info, dict):
+                            # well_info中，通道名直接作为键，值是Ct值
+                            # 例如: {'CY5': 23.32, 'FAM': 20.07, 'VIC': 25.03, 'ROX': 23.45}
+                            if channel_name in well_info:
+                                ct_value = well_info[channel_name]
+                                if isinstance(ct_value, (int, float)) and 0 < ct_value < 50:
+                                    well.ct_values[channel_name] = float(ct_value)
+                                    print(f"调试: 孔位 {well_name} 通道 {channel_name} Ct值: {ct_value}")
+                            # 也检查其他可能的键名（如'channels'等，但这些不是Ct值）
+        
+        return model
+
+
 class ConverterFactory:
     """转换器工厂"""
     
@@ -215,6 +291,7 @@ class ConverterFactory:
         """根据厂商类型获取对应的转换器"""
         converters = {
             'vendor_a': VendorAConverter(),
+            'vendor_7500': Vendor7500Converter(),
             'default': DefaultConverter(),
         }
         return converters.get(vendor_type, DefaultConverter())
