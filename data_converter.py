@@ -275,9 +275,8 @@ class Vendor7500Converter(DataConverter):
                             # 例如: {'CY5': 23.32, 'FAM': 20.07, 'VIC': 25.03, 'ROX': 23.45}
                             if channel_name in well_info:
                                 ct_value = well_info[channel_name]
-                                if isinstance(ct_value, (int, float)) and 0 < ct_value < 50:
+                                if isinstance(ct_value, (int, float)) and 0 < ct_value <= 42:
                                     well.ct_values[channel_name] = float(ct_value)
-                                    print(f"调试: 孔位 {well_name} 通道 {channel_name} Ct值: {ct_value}")
                             # 也检查其他可能的键名（如'channels'等，但这些不是Ct值）
         
         return model

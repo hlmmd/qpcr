@@ -682,31 +682,6 @@ class PCRAnalyzerApp(QMainWindow):
                 vendor_type = parser.detect_vendor(file_path)
                 self.data_model = ConverterFactory.convert_data(self.parsed_data, vendor_type)
                 
-                # 调试信息
-                print(f"=== 数据解析调试信息 ===")
-                print(f"解析的数据键: {list(self.parsed_data.keys())}")
-                if 'amplification_data' in self.parsed_data:
-                    amp_data = self.parsed_data['amplification_data']
-                    print(f"扩增数据形状: {amp_data.shape if not amp_data.empty else '空'}")
-                    print(f"扩增数据列: {list(amp_data.columns) if not amp_data.empty else '无'}")
-                    if not amp_data.empty:
-                        print(f"扩增数据前5行:\n{amp_data.head()}")
-                if 'well_data' in self.parsed_data:
-                    print(f"孔位数据: {list(self.parsed_data['well_data'].keys())}")
-                
-                print(f"数据模型孔位数量: {len(self.data_model.wells)}")
-                if self.data_model.wells:
-                    print(f"孔位列表: {list(self.data_model.wells.keys())}")
-                    first_well = list(self.data_model.wells.values())[0]
-                    print(f"第一个孔位通道: {list(first_well.channels.keys())}")
-                    if first_well.channels:
-                        first_channel = list(first_well.channels.keys())[0]
-                        print(f"第一个通道数据长度: {len(first_well.channels[first_channel])}")
-                        print(f"第一个通道前5个值: {first_well.channels[first_channel][:5]}")
-                else:
-                    print("警告: 数据模型中没有孔位数据！")
-                print(f"=== 调试信息结束 ===\n")
-                
                 # 更新孔板数据
                 self.update_plate_data()
                 
@@ -823,7 +798,6 @@ class PCRAnalyzerApp(QMainWindow):
             ax.set_xticks([])
             ax.set_yticks([])
             self.canvas.draw()
-            print(f"绘制曲线错误: {e}")  # 调试信息
     
     def update_curve_info(self, well_names: List[str], channel_names: List[str]):
         """更新曲线信息显示"""

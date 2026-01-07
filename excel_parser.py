@@ -55,8 +55,15 @@ class ExcelParser:
             wb = openpyxl.load_workbook(file_path)
             sheet_names = wb.sheetnames
         
-        # 检测7500格式（包含'Amplification Data', 'Results', 'Raw Data'等工作表）
-        if any(name in sheet_names for name in ['Amplification Data', 'Results', 'Raw Data', 'Sample Setup']):
+        # 检测7500格式（必须同时包含多个7500特有的工作表）
+        # 7500格式通常包含：Sample Setup, Amplification Data, Results, Raw Data, Multicomponent Data
+        has_sample_setup = 'Sample Setup' in sheet_names
+        has_amplification = 'Amplification Data' in sheet_names
+        has_results = 'Results' in sheet_names
+        has_raw_data = 'Raw Data' in sheet_names
+        
+        # 7500格式至少需要包含Sample Setup和Results，或者包含多个7500特有工作表
+        if (has_sample_setup and has_results) or (has_amplification and has_results and has_raw_data):
             return 'vendor_7500'
         
         # 根据工作表名称和内容特征识别
@@ -346,7 +353,6 @@ class VendorAParser(BaseParser):
                     break
         
         if channel_row_idx is None or not channels:
-            print(f"警告: 未找到通道信息，尝试默认解析...")
             # 如果还是找不到，尝试从数据中推断
             # 查找第一个包含数字的行
             for idx in range(len(df)):
@@ -365,10 +371,7 @@ class VendorAParser(BaseParser):
                         pass
         
         if channel_row_idx is None or not channels:
-            print(f"错误: 无法找到通道信息")
             return pd.DataFrame()
-        
-        print(f"找到通道行: {channel_row_idx}, 通道: {channels}")
         
         # 提取数据
         data_rows = []
@@ -431,7 +434,7 @@ class VendorAParser(BaseParser):
                             if pd.notna(next_val):
                                 try:
                                     ct_val = float(next_val)
-                                    if 0 < ct_val < 50:  # 合理的Ct值范围
+                                    if 0 < ct_val <= 42:  # 合理的Ct值范围（最大42）
                                         well_info['ct'] = ct_val
                                         break
                                 except:
@@ -502,10 +505,7 @@ class VendorAParser(BaseParser):
                 break
         
         if header_row_idx is None:
-            print("未找到表头行")
             return pd.DataFrame()
-        
-        print(f"找到表头行: {header_row_idx}, 孔位列: {well_col_idx}, 通道列: {channel_col_idx}, Ct列: {ct_col_idx}, 样本名称列: {sample_name_col_idx}, 数据开始列: {data_start_col}")
         
         # 提取数据
         data_rows = []
@@ -592,7 +592,6 @@ class VendorAParser(BaseParser):
         
         if data_rows:
             result_df = pd.DataFrame(data_rows)
-            print(f"提取到 {len(result_df)} 行扩增数据，最大循环数: {max_cycles}")
             return result_df
         
         return pd.DataFrame()
@@ -671,7 +670,6 @@ class VendorAParser(BaseParser):
         
         if data_rows:
             result_df = pd.DataFrame(data_rows)
-            print(f"提取到 {len(result_df)} 行原始数据")
             return result_df
         
         return pd.DataFrame()
@@ -704,8 +702,14 @@ class Vendor7500Parser(BaseParser):
             result['experiment_info'] = self.extract_experiment_info(df_setup)
             result['well_data'] = self.extract_well_data_from_setup(df_setup)
         
-        # 解析Amplification Data工作表
-        if self._sheet_exists(file_path, 'Amplification Data', engine):
+        # 优先从Multicomponent Data工作表读取扩增数据（用于PCR曲线）
+        if self._sheet_exists(file_path, 'Multicomponent Data', engine):
+            df_multicomponent = pd.read_excel(file_path, sheet_name='Multicomponent Data', header=None, engine=engine)
+            result['sheets']['Multicomponent Data'] = df_multicomponent
+            result['amplification_data'] = self.extract_amplification_data_from_multicomponent(df_multicomponent)
+        
+        # 如果没有Multicomponent Data，则从Amplification Data读取
+        if result['amplification_data'].empty and self._sheet_exists(file_path, 'Amplification Data', engine):
             df_amp = pd.read_excel(file_path, sheet_name='Amplification Data', header=None, engine=engine)
             result['sheets']['Amplification Data'] = df_amp
             result['amplification_data'] = self.extract_amplification_data(df_amp)
@@ -970,17 +974,11 @@ class Vendor7500Parser(BaseParser):
         # 对于7500格式，Ct值列固定在第6列（G列，索引6）
         if len(header) > 6:
             ct_col = 6  # G列，索引6
-            print(f"使用7500格式标准Ct值列位置: 列6 (G列)")
         else:
-            print(f"警告: 表头列数不足，无法使用列6")
             return ct_data
         
         if well_col is None or target_col is None:
-            print(f"警告: 未找到必要的列 - well_col: {well_col}, target_col: {target_col}, ct_col: {ct_col}")
-            print(f"表头内容: {[str(x) for x in header if pd.notna(x)]}")
             return ct_data
-        
-        print(f"找到列索引 - well_col: {well_col}, target_col: {target_col}, ct_col: {ct_col}")
         
         # 提取数据
         ct_count = 0
@@ -1018,18 +1016,95 @@ class Vendor7500Parser(BaseParser):
                 
                 try:
                     ct_value = float(ct_val)
-                    if 0 < ct_value < 50:  # 合理的Ct值范围
+                    if 0 < ct_value <= 42:  # 合理的Ct值范围（最大42）
                         if well_name not in ct_data:
                             ct_data[well_name] = {}
                         ct_data[well_name][channel_name] = ct_value
                         ct_count += 1
                 except Exception as e:
-                    # 调试信息：打印无法转换的值（只打印前几个）
-                    if ct_count < 3:
-                        print(f"无法转换Ct值: 孔位={well_name}, 通道={channel_name}, 列={ct_col}, 值={repr(ct_val)}, 类型={type(ct_val)}, 错误={e}")
+                    pass
         
-        print(f"从Results工作表提取了 {ct_count} 个Ct值")
         return ct_data
+    
+    def extract_amplification_data_from_multicomponent(self, df):
+        """从Multicomponent Data工作表提取扩增数据"""
+        # 查找表头行（通常是第7行，索引7）
+        header_row = None
+        for idx in range(min(10, len(df))):
+            row = df.iloc[idx]
+            row_str = ' '.join([str(x) for x in row if pd.notna(x)])
+            if 'Well' in row_str and 'Cycle' in row_str:
+                header_row = idx
+                break
+        
+        if header_row is None:
+            return pd.DataFrame()
+        
+        # 确定列索引
+        header = df.iloc[header_row]
+        well_col = None
+        cycle_col = None
+        channel_cols = {}  # {channel_name: col_index}
+        
+        for i, val in enumerate(header):
+            if pd.notna(val):
+                val_str = str(val).strip()
+                if val_str == 'Well':
+                    well_col = i
+                elif val_str == 'Cycle':
+                    cycle_col = i
+                elif val_str in ['FAM', 'JOE', 'CY5', 'ROX', 'VIC', 'HEX']:
+                    # 映射通道名：JOE -> VIC, HEX -> VIC
+                    if val_str == 'JOE' or val_str == 'HEX':
+                        channel_name = 'VIC'
+                    else:
+                        channel_name = val_str
+                    channel_cols[channel_name] = i
+        
+        if well_col is None or cycle_col is None or not channel_cols:
+            return pd.DataFrame()
+        
+        # 提取数据
+        data_rows = []
+        for idx in range(header_row + 1, len(df)):
+            row = df.iloc[idx]
+            
+            # 获取孔位
+            if well_col >= len(row) or pd.isna(row.iloc[well_col]):
+                continue
+            
+            well_name = str(row.iloc[well_col]).strip()
+            if not re.match(r'^[A-H][0-9]{1,2}$', well_name, re.IGNORECASE):
+                continue
+            well_name = well_name.upper()
+            
+            # 获取循环数
+            if cycle_col >= len(row) or pd.isna(row.iloc[cycle_col]):
+                continue
+            
+            try:
+                cycle = int(float(row.iloc[cycle_col]))
+            except:
+                continue
+            
+            # 获取各通道的值
+            for channel_name, col_idx in channel_cols.items():
+                if col_idx < len(row) and pd.notna(row.iloc[col_idx]):
+                    try:
+                        value = float(row.iloc[col_idx])
+                        data_rows.append({
+                            'Cycle': cycle,
+                            'Well': well_name,
+                            'Channel': channel_name,
+                            'Amplification': value
+                        })
+                    except:
+                        pass
+        
+        if data_rows:
+            result_df = pd.DataFrame(data_rows)
+            return result_df
+        return pd.DataFrame()
     
     def extract_raw_data(self, df):
         """从Raw Data工作表提取原始数据"""

@@ -119,17 +119,19 @@ class DataVisualizer:
                 if not well_df.empty:
                     ax.plot(well_df['Cycle'], well_df[y_column],
                            color=color,
-                           linewidth=2)
+                           linewidth=2,
+                           label=f"{channel}" + (f" - {well_names[0]}" if len(well_names) == 1 else ""))
                     plotted_count += 1
         
         ax.set_xlabel('循环数', fontsize=12)
         ax.set_ylabel(y_label, fontsize=12)
         
-        # 设置y轴范围
+        # 固定坐标轴范围
+        ax.set_xlim(0, 42)  # 横坐标固定为0-42循环
         if curve_type == 'amplification':
-            ax.set_ylim(0, 5000)  # 扩增曲线：0-5000
-        else:  # raw
-            ax.set_ylim(0, 10000)  # 原始曲线：0-10000
+            ax.set_ylim(0, 5000)  # 扩增曲线纵坐标固定为0-5000
+        else:
+            ax.set_ylim(0, 10000)  # 原始曲线纵坐标固定为0-10000
         
         # 添加孔位信息到标题
         if well_names:
@@ -142,7 +144,9 @@ class DataVisualizer:
         
         ax.set_title(title, fontsize=14, fontweight='bold')
         
-        # 不显示图例
+        # 显示图例（当有多个通道或多个孔位时）
+        if len(channel_names) > 1 or (len(well_names) > 1 and plotted_count > 1):
+            ax.legend(loc='best', fontsize=9, ncol=min(2, len(channel_names)))
         
         ax.grid(True, alpha=0.3)
         
