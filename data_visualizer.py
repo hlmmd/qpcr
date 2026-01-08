@@ -6,6 +6,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import matplotlib
 from matplotlib.figure import Figure
+from matplotlib.ticker import ScalarFormatter
 from typing import List
 from data_model import PCRDataModel
 
@@ -128,10 +129,43 @@ class DataVisualizer:
         
         # 固定坐标轴范围
         ax.set_xlim(0, 42)  # 横坐标固定为0-42循环
+        
+        # 根据所有数据范围确定纵坐标（不限制well_names和channel_names）
         if curve_type == 'amplification':
-            ax.set_ylim(0, 5000)  # 扩增曲线纵坐标固定为0-5000
+            all_data_df = data_model.get_amplification_data(None, None)
+            y_column_all = 'Amplification'
         else:
-            ax.set_ylim(0, 10000)  # 原始曲线纵坐标固定为0-10000
+            all_data_df = data_model.get_raw_data(None, None)
+            y_column_all = 'RawValue'
+        
+        if not all_data_df.empty and y_column_all in all_data_df.columns:
+            # 计算所有数据的最小值和最大值
+            y_min = all_data_df[y_column_all].min()
+            y_max = all_data_df[y_column_all].max()
+            
+            # 如果数据有效，设置纵坐标范围（添加10%的边距）
+            if pd.notna(y_min) and pd.notna(y_max) and y_max > y_min:
+                y_range = y_max - y_min
+                y_padding = y_range * 0.1  # 10%的边距
+                # 允许负值显示，但确保最小值不小于y_min - y_padding
+                y_bottom = y_min - y_padding
+                # 对于扩增曲线，如果最小值接近0或为正，则从0开始
+                if curve_type == 'amplification' and y_min >= 0:
+                    y_bottom = max(0, y_bottom)
+                ax.set_ylim(y_bottom, y_max + y_padding)
+            else:
+                # 如果数据无效，使用默认值
+                ax.set_ylim(0, 5000 if curve_type == 'amplification' else 10000)
+        else:
+            # 如果没有数据，使用默认值
+            if curve_type == 'amplification':
+                ax.set_ylim(0, 5000)  # 扩增曲线纵坐标默认值
+            else:
+                ax.set_ylim(0, 10000)  # 原始曲线纵坐标默认值
+        
+        # 禁用y轴科学计数法，直接显示数值
+        ax.yaxis.set_major_formatter(ScalarFormatter(useOffset=False))
+        ax.yaxis.get_major_formatter().set_scientific(False)
         
         # 添加孔位信息到标题
         if well_names:
