@@ -106,6 +106,9 @@ def load_projects_from_excel(file_path):
                             # 检查是否是threshold列
                             elif 'THRESHOLD' in val_str or '阈值' in val_str or 'TH' in val_str:
                                 col_map[f'{ch}_threshold'] = i
+                            # 检查是否是未定阈值列
+                            elif '未定阈值' in val_str or 'UNDETERMINED' in val_str or 'GRAY' in val_str or '灰区' in val_str:
+                                col_map[f'{ch}_undetermined_threshold'] = i
         
         # 如果主表头行没有找到项目编号列，检查下一行（可能是多行表头）
         if 'project_id' not in col_map and header_row + 1 < len(df):
@@ -151,6 +154,16 @@ def load_projects_from_excel(file_path):
                                     if f'{ch}_threshold' not in col_map:
                                         col_map[f'{ch}_threshold'] = i
                                     break
+                    elif '未定阈值' in val_str or 'UNDETERMINED' in val_str or 'GRAY' in val_str or '灰区' in val_str:
+                        # 查找对应的通道
+                        if i < len(header):
+                            prev_val = header[i] if pd.notna(header[i]) else ''
+                            prev_val_str = str(prev_val).upper()
+                            for ch in channels:
+                                if ch in prev_val_str:
+                                    if f'{ch}_undetermined_threshold' not in col_map:
+                                        col_map[f'{ch}_undetermined_threshold'] = i
+                                    break
         
         # 如果找不到通道列映射，尝试按位置推断
         # 检查是否所有通道的target和threshold都没有找到
@@ -163,15 +176,29 @@ def load_projects_from_excel(file_path):
             # 根据实际数据格式推断：
             # 列2-5: FAM, VIC, CY5, ROX 的target（目标）
             # 列6-9: FAM, VIC, CY5, ROX 的threshold（阈值）
+            # 列10-13 (K-N): FAM, VIC, CY5, ROX 的未定阈值
             if 'project_name' in col_map and 'project_id' in col_map:
-                # 从列2开始是target，列6开始是threshold
+                # 从列2开始是target，列6开始是threshold，列10开始是未定阈值
                 target_start_col = 2
                 threshold_start_col = 6
+                undetermined_threshold_start_col = 10  # K列
                 for i, ch in enumerate(missing_channels):
                     if f'{ch}_target' not in col_map:
                         col_map[f'{ch}_target'] = target_start_col + i
                     if f'{ch}_threshold' not in col_map:
                         col_map[f'{ch}_threshold'] = threshold_start_col + i
+                    # 尝试读取未定阈值（K-N列，索引10-13）
+                    if f'{ch}_undetermined_threshold' not in col_map:
+                        col_map[f'{ch}_undetermined_threshold'] = undetermined_threshold_start_col + i
+        
+        # 即使target和threshold都找到了，也尝试通过列位置读取未定阈值（K-N列，索引10-13）
+        # 如果表头中没有"未定阈值"标识，通过列位置推断
+        if 'project_name' in col_map:
+            undetermined_threshold_start_col = 10  # K列
+            for i, ch in enumerate(channels):
+                if f'{ch}_undetermined_threshold' not in col_map:
+                    # 尝试通过列位置推断（K-N列对应FAM, VIC, CY5, ROX）
+                    col_map[f'{ch}_undetermined_threshold'] = undetermined_threshold_start_col + i
         
         # 确定数据起始行：如果项目编号列在下一行找到，数据从header_row+2开始，否则从header_row+1开始
         data_start_row = header_row + 1
@@ -237,6 +264,17 @@ def load_projects_from_excel(file_path):
                         try:
                             threshold = float(threshold_val)
                             projects[project_name][ch]['threshold'] = threshold
+                        except:
+                            pass
+                
+                # 读取未定阈值（灰区阈值）
+                undetermined_threshold_key = f'{ch}_undetermined_threshold'
+                if undetermined_threshold_key in col_map and col_map[undetermined_threshold_key] < len(row):
+                    undetermined_threshold_val = row.iloc[col_map[undetermined_threshold_key]]
+                    if pd.notna(undetermined_threshold_val):
+                        try:
+                            undetermined_threshold = float(undetermined_threshold_val)
+                            projects[project_name][ch]['undetermined_threshold'] = undetermined_threshold
                         except:
                             pass
         
@@ -1070,11 +1108,11 @@ class PCRAnalyzerApp(QMainWindow):
         valid_channels.extend(remaining_channels)
         
         # 设置表格列数和列标题
-        column_count = 4 + len(valid_channels) + 1  # Well + 样本 + 项目名 + 产品编号 + 通道列 + 判读结果
+        column_count = 4 + len(valid_channels) + 2  # Well + 样本 + 项目名 + 产品编号 + 通道列 + 判读结果 + 灰区
         self.judgment_table.setColumnCount(column_count)
         # 给每个通道名称添加"(CT)"后缀
         channel_headers = [f"{ch}(CT)" for ch in valid_channels]
-        headers = ['Well', '样本', '项目名', '产品编号'] + channel_headers + ['判读结果']
+        headers = ['Well', '样本', '项目名', '产品编号'] + channel_headers + ['判读结果', '灰区']
         self.judgment_table.setHorizontalHeaderLabels(headers)
         
         # 准备结果数据（每个孔位 × 每个项目）
@@ -1103,16 +1141,18 @@ class PCRAnalyzerApp(QMainWindow):
                 # 获取各通道的CT值（只处理有效通道）
                 ct_values = {}
                 positive_targets = []
+                gray_zone_targets = []  # 灰区targets
                 
                 for ch_name in valid_channels:
                     # 获取CT值（VIC和HEX等价）
                     ct_value = get_ct_value(well, ch_name)
                     ct_values[ch_name] = ct_value
                     
-                    # 判断是否阳性（只判断当前项目配置中包含的通道）
+                    # 判断是否阳性或灰区（只判断当前项目配置中包含的通道）
                     if ch_name in project_config:
                         ch_config = project_config[ch_name]
                         threshold = ch_config.get('threshold', None)
+                        undetermined_threshold = ch_config.get('undetermined_threshold', None)
                         target = ch_config.get('target', '')
                         
                         if ct_value is not None and threshold is not None:
@@ -1122,6 +1162,11 @@ class PCRAnalyzerApp(QMainWindow):
                                 if target and target.strip() and target.strip() != '\\' and target.strip() != '/':
                                     positive_targets.append(target)
                                 # 如果target无效，不添加到列表中（不显示通道名）
+                            # CT值在(阈值, 未定阈值]之间则为灰区
+                            elif undetermined_threshold is not None and threshold < ct_value <= undetermined_threshold:
+                                # 只添加有效的target，过滤掉空值、"\"、"/"等无效target
+                                if target and target.strip() and target.strip() != '\\' and target.strip() != '/':
+                                    gray_zone_targets.append(target)
                 
                 # 获取产品编号
                 project_id = project_config.get('project_id', '')
@@ -1137,6 +1182,7 @@ class PCRAnalyzerApp(QMainWindow):
                     'project_id': project_id,
                     'ct_values': ct_values,
                     'positive_targets': positive_targets,
+                    'gray_zone_targets': gray_zone_targets,
                     'project_config': project_config
                 })
         
@@ -1172,12 +1218,18 @@ class PCRAnalyzerApp(QMainWindow):
                 
                 if ct_value is not None:
                     item = QTableWidgetItem(f"{ct_value:.2f}")
-                    # 根据是否阳性设置颜色（只判断当前项目配置中包含的通道）
+                    # 根据是否阳性或灰区设置颜色（只判断当前项目配置中包含的通道）
                     if ch_name in project_config:
                         ch_config = project_config[ch_name]
                         threshold = ch_config.get('threshold', None)
-                        if threshold is not None and ct_value < threshold:
-                            item.setBackground(QColor(255, 200, 200))  # 浅红色 - 阳性
+                        undetermined_threshold = ch_config.get('undetermined_threshold', None)
+                        if threshold is not None:
+                            if ct_value < threshold:
+                                item.setBackground(QColor(255, 200, 200))  # 浅红色 - 阳性
+                            elif undetermined_threshold is not None and threshold < ct_value <= undetermined_threshold:
+                                item.setBackground(QColor(220, 220, 220))  # 灰色 - 灰区
+                            else:
+                                item.setBackground(QColor(200, 255, 200))  # 浅绿色 - 阴性
                         else:
                             item.setBackground(QColor(200, 255, 200))  # 浅绿色 - 阴性
                     # 如果没有项目配置，不设置背景色（显示默认颜色）
@@ -1185,18 +1237,33 @@ class PCRAnalyzerApp(QMainWindow):
                 else:
                     self.judgment_table.setItem(row_idx, col_idx, QTableWidgetItem("N/A"))
             
-            # 判读结果（阳性targets）
+            # 判读结果（只显示阳性targets）
             result_col_idx = 4 + len(valid_channels)  # 判读结果列索引
             # 过滤掉无效的target（如"\"、"/"等）
             valid_positive_targets = [t for t in result['positive_targets'] 
                                      if t and t.strip() and t.strip() != '\\' and t.strip() != '/']
+            
             if valid_positive_targets:
                 result_text = ", ".join(valid_positive_targets)
                 item = QTableWidgetItem(result_text)
-                item.setBackground(QColor(255, 200, 200))  # 浅红色
+                item.setBackground(QColor(255, 200, 200))  # 浅红色 - 阳性
                 self.judgment_table.setItem(row_idx, result_col_idx, item)
             else:
                 self.judgment_table.setItem(row_idx, result_col_idx, QTableWidgetItem("阴性"))
+            
+            # 灰区列（只显示灰区targets）
+            gray_zone_col_idx = 4 + len(valid_channels) + 1  # 灰区列索引
+            # 过滤掉无效的target（如"\"、"/"等）
+            valid_gray_zone_targets = [t for t in result.get('gray_zone_targets', [])
+                                      if t and t.strip() and t.strip() != '\\' and t.strip() != '/']
+            
+            if valid_gray_zone_targets:
+                gray_text = ", ".join(valid_gray_zone_targets)
+                item = QTableWidgetItem(gray_text)
+                item.setBackground(QColor(220, 220, 220))  # 灰色 - 灰区
+                self.judgment_table.setItem(row_idx, gray_zone_col_idx, item)
+            else:
+                self.judgment_table.setItem(row_idx, gray_zone_col_idx, QTableWidgetItem(""))
         
         # 调整列宽
         self.judgment_table.resizeColumnsToContents()
