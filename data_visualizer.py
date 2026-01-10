@@ -78,7 +78,16 @@ class DataVisualizer:
         plotted_count = 0  # 用于颜色索引
         
         for channel in channel_names:
+            # 处理HEX和VIC的等价关系：如果选择HEX但数据是VIC，也显示；反之亦然
             channel_df = df[df['Channel'] == channel]
+            if channel_df.empty:
+                # 如果选择HEX但找不到HEX数据，尝试查找VIC数据
+                if channel == 'HEX':
+                    channel_df = df[df['Channel'] == 'VIC']
+                # 如果选择VIC但找不到VIC数据，尝试查找HEX数据
+                elif channel == 'VIC':
+                    channel_df = df[df['Channel'] == 'HEX']
+            
             if channel_df.empty:
                 continue
             

@@ -279,6 +279,53 @@ class Vendor7500Converter(DataConverter):
                                     well.ct_values[channel_name] = float(ct_value)
                             # 也检查其他可能的键名（如'channels'等，但这些不是Ct值）
         
+        # 处理原始数据
+        if 'raw_data' in parsed_data:
+            df_raw = parsed_data['raw_data']
+            if not df_raw.empty and 'Well' in df_raw.columns and 'Channel' in df_raw.columns:
+                # 按孔位和通道分组
+                for (well_name, channel_name), group_df in df_raw.groupby(['Well', 'Channel']):
+                    if pd.isna(well_name) or pd.isna(channel_name):
+                        continue
+                    
+                    well_name = str(well_name).strip()
+                    channel_name = str(channel_name).strip()
+                    
+                    # 跳过列名
+                    if channel_name in ['Well', 'Channel', 'Amplification', 'Value', 'Cycle', 'RawValue']:
+                        continue
+                    
+                    # 获取或创建孔位数据
+                    if well_name not in model.wells:
+                        well = WellData(well_name=well_name)
+                        model.add_well(well)
+                    else:
+                        well = model.get_well(well_name)
+                    
+                    # 添加原始通道数据
+                    if 'Cycle' in group_df.columns:
+                        group_df = group_df.sort_values('Cycle')
+                        cycles = group_df['Cycle'].tolist()
+                        # 如果还没有循环数，设置循环数
+                        if not well.cycles:
+                            well.cycles = cycles
+                    
+                    # 获取原始值
+                    if 'RawValue' in group_df.columns:
+                        values = group_df['RawValue'].tolist()
+                    else:
+                        continue
+                    
+                    # 过滤NaN并确保长度正确
+                    values = [v if pd.notna(v) else 0.0 for v in values]
+                    if well.cycles and len(values) != len(well.cycles):
+                        if len(values) > len(well.cycles):
+                            values = values[:len(well.cycles)]
+                        else:
+                            values.extend([0.0] * (len(well.cycles) - len(values)))
+                    
+                    well.raw_channels[channel_name] = values
+        
         return model
 
 

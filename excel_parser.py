@@ -702,11 +702,13 @@ class Vendor7500Parser(BaseParser):
             result['experiment_info'] = self.extract_experiment_info(df_setup)
             result['well_data'] = self.extract_well_data_from_setup(df_setup)
         
-        # 优先从Multicomponent Data工作表读取扩增数据（用于PCR曲线）
+        # 优先从Multicomponent Data工作表读取扩增数据和原始数据
         if self._sheet_exists(file_path, 'Multicomponent Data', engine):
             df_multicomponent = pd.read_excel(file_path, sheet_name='Multicomponent Data', header=None, engine=engine)
             result['sheets']['Multicomponent Data'] = df_multicomponent
             result['amplification_data'] = self.extract_amplification_data_from_multicomponent(df_multicomponent)
+            # 从Multicomponent Data工作表提取原始数据（D列的Rn值）
+            result['raw_data'] = self.extract_raw_data_from_multicomponent(df_multicomponent)
         
         # 如果没有Multicomponent Data，则从Amplification Data读取
         if result['amplification_data'].empty and self._sheet_exists(file_path, 'Amplification Data', engine):
@@ -725,8 +727,8 @@ class Vendor7500Parser(BaseParser):
                     result['well_data'][well_name] = {}
                 result['well_data'][well_name].update(channel_ct)
         
-        # 解析Raw Data工作表
-        if self._sheet_exists(file_path, 'Raw Data', engine):
+        # 如果没有从Multicomponent Data获取原始数据，则从Raw Data工作表读取
+        if result['raw_data'].empty and self._sheet_exists(file_path, 'Raw Data', engine):
             df_raw = pd.read_excel(file_path, sheet_name='Raw Data', header=None, engine=engine)
             result['sheets']['Raw Data'] = df_raw
             result['raw_data'] = self.extract_raw_data(df_raw)
@@ -904,11 +906,12 @@ class Vendor7500Parser(BaseParser):
             channel_name = None
             if target_col is not None and target_col < len(row) and pd.notna(row.iloc[target_col]):
                 target_name = str(row.iloc[target_col]).strip()
-                # 映射通道名
-                if target_name == 'HEX' or target_name == 'JOE':
+                # 保留HEX作为独立通道，不映射为VIC（因为UI中有HEX选项）
+                # JOE映射为VIC（JOE是VIC的旧名称）
+                if target_name == 'JOE':
                     channel_name = 'VIC'
                 else:
-                    channel_name = target_name
+                    channel_name = target_name  # HEX保持为HEX
             
             if not channel_name:
                 continue
@@ -1044,7 +1047,8 @@ class Vendor7500Parser(BaseParser):
         header = df.iloc[header_row]
         well_col = None
         cycle_col = None
-        channel_cols = {}  # {channel_name: col_index}
+        target_col = None  # Target Name列，用于确定通道
+        delta_rn_col = 4  # E列，索引4（固定使用E列作为delta Rn值）
         
         for i, val in enumerate(header):
             if pd.notna(val):
@@ -1053,19 +1057,15 @@ class Vendor7500Parser(BaseParser):
                     well_col = i
                 elif val_str == 'Cycle':
                     cycle_col = i
-                elif val_str in ['FAM', 'JOE', 'CY5', 'ROX', 'VIC', 'HEX']:
-                    # 映射通道名：JOE -> VIC, HEX -> VIC
-                    if val_str == 'JOE' or val_str == 'HEX':
-                        channel_name = 'VIC'
-                    else:
-                        channel_name = val_str
-                    channel_cols[channel_name] = i
+                elif val_str == 'Target Name':
+                    target_col = i
         
-        if well_col is None or cycle_col is None or not channel_cols:
+        if well_col is None or cycle_col is None or target_col is None:
             return pd.DataFrame()
         
-        # 提取数据
+        # 提取数据，直接使用E列的Delta Rn值
         data_rows = []
+        
         for idx in range(header_row + 1, len(df)):
             row = df.iloc[idx]
             
@@ -1087,19 +1087,151 @@ class Vendor7500Parser(BaseParser):
             except:
                 continue
             
-            # 获取各通道的值
-            for channel_name, col_idx in channel_cols.items():
-                if col_idx < len(row) and pd.notna(row.iloc[col_idx]):
+            # 获取通道名（从Target Name列）
+            if target_col >= len(row) or pd.isna(row.iloc[target_col]):
+                continue
+            
+            target_name = str(row.iloc[target_col]).strip()
+            # 映射通道名：JOE -> VIC, HEX保持为HEX
+            if target_name == 'JOE':
+                channel_name = 'VIC'
+            elif target_name == 'HEX':
+                channel_name = 'HEX'  # 保留HEX作为独立通道
+            else:
+                channel_name = target_name
+            
+            # 获取E列的delta Rn值（索引4）
+            if delta_rn_col >= len(row) or pd.isna(row.iloc[delta_rn_col]):
+                continue
+            
+            try:
+                delta_rn_value = float(row.iloc[delta_rn_col])
+            except:
+                continue
+            
+            data_rows.append({
+                'Cycle': cycle,
+                'Well': well_name,
+                'Channel': channel_name,
+                'Amplification': delta_rn_value
+            })
+        
+        if data_rows:
+            result_df = pd.DataFrame(data_rows)
+            
+            # Debug: 输出C2孔位FAM通道的最终结果汇总
+            c2_fam_data = result_df[(result_df['Well'] == 'C2') & (result_df['Channel'] == 'FAM')]
+            return result_df
+        return pd.DataFrame()
+    
+    def extract_raw_data_from_multicomponent(self, df):
+        """从Multicomponent Data工作表提取原始数据（D列的Rn值）"""
+        # 查找表头行（通常是第7行，索引7）
+        header_row = None
+        for idx in range(min(10, len(df))):
+            row = df.iloc[idx]
+            row_str = ' '.join([str(x) for x in row if pd.notna(x)])
+            if 'Well' in row_str and 'Cycle' in row_str:
+                header_row = idx
+                break
+        
+        if header_row is None:
+            return pd.DataFrame()
+        
+        # 确定列索引
+        header = df.iloc[header_row]
+        well_col = None
+        cycle_col = None
+        channel_cols = {}  # {channel_name: col_index} 通道列映射
+        rn_col = 3  # D列，索引3（固定使用D列作为Rn值）
+        
+        for i, val in enumerate(header):
+            if pd.notna(val):
+                val_str = str(val).strip()
+                if val_str == 'Well':
+                    well_col = i
+                elif val_str == 'Cycle':
+                    cycle_col = i
+                elif val_str in ['FAM', 'JOE', 'CY5', 'ROX', 'VIC', 'HEX']:
+                    # 映射通道名：JOE -> VIC, HEX保持为HEX
+                    if val_str == 'JOE':
+                        channel_name = 'VIC'
+                    elif val_str == 'HEX':
+                        channel_name = 'HEX'  # 保留HEX作为独立通道
+                    else:
+                        channel_name = val_str
+                    channel_cols[channel_name] = i
+        
+        if well_col is None or cycle_col is None or not channel_cols:
+            return pd.DataFrame()
+        
+        # 提取数据，直接使用D列的Rn值
+        data_rows = []
+        processed_count = 0
+        skipped_count = 0
+        
+        for idx in range(header_row + 1, len(df)):
+            row = df.iloc[idx]
+            processed_count += 1
+            
+            # 获取孔位
+            if well_col >= len(row) or pd.isna(row.iloc[well_col]):
+                skipped_count += 1
+                continue
+            
+            well_name = str(row.iloc[well_col]).strip()
+            if not re.match(r'^[A-H][0-9]{1,2}$', well_name, re.IGNORECASE):
+                skipped_count += 1
+                continue
+            well_name = well_name.upper()
+            
+            # 获取循环数
+            if cycle_col >= len(row) or pd.isna(row.iloc[cycle_col]):
+                skipped_count += 1
+                continue
+            
+            try:
+                cycle = int(float(row.iloc[cycle_col]))
+            except:
+                skipped_count += 1
+                continue
+            
+            # 获取D列的Rn值（索引3）
+            if rn_col >= len(row) or pd.isna(row.iloc[rn_col]):
+                skipped_count += 1
+                continue
+            
+            try:
+                rn_value = float(row.iloc[rn_col])
+            except:
+                skipped_count += 1
+                continue
+            
+            # 确定通道名：检查哪个通道列有值（除了Well、Cycle和D列）
+            # 如果某个通道列有值，说明这一行属于该通道
+            channel_name = None
+            for ch_name, ch_col_idx in channel_cols.items():
+                if ch_col_idx < len(row) and pd.notna(row.iloc[ch_col_idx]):
+                    # 检查该通道列是否有有效值
                     try:
-                        value = float(row.iloc[col_idx])
-                        data_rows.append({
-                            'Cycle': cycle,
-                            'Well': well_name,
-                            'Channel': channel_name,
-                            'Amplification': value
-                        })
+                        ch_value = float(row.iloc[ch_col_idx])
+                        # 如果通道列有值，说明这一行属于该通道
+                        channel_name = ch_name
+                        break
                     except:
                         pass
+            
+            # 如果无法确定通道，跳过
+            if not channel_name:
+                skipped_count += 1
+                continue
+            
+            data_rows.append({
+                'Cycle': cycle,
+                'Well': well_name,
+                'Channel': channel_name,
+                'RawValue': rn_value
+            })
         
         if data_rows:
             result_df = pd.DataFrame(data_rows)

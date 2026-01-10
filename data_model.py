@@ -91,10 +91,19 @@ class PCRDataModel:
                 if channel_name in ['Well', 'Channel', 'Amplification', 'Value', 'Cycle', 'RawValue']:
                     continue
                 
+                # 处理HEX和VIC的等价关系
+                actual_channel = channel_name
                 if not well.has_channel(channel_name):
-                    continue
+                    # 如果选择HEX但找不到HEX数据，尝试查找VIC数据
+                    if channel_name == 'HEX' and well.has_channel('VIC'):
+                        actual_channel = 'VIC'
+                    # 如果选择VIC但找不到VIC数据，尝试查找HEX数据
+                    elif channel_name == 'VIC' and well.has_channel('HEX'):
+                        actual_channel = 'HEX'
+                    else:
+                        continue
                 
-                values = well.get_channel_data(channel_name)
+                values = well.get_channel_data(actual_channel)
                 if not values:
                     continue
                 
@@ -104,7 +113,7 @@ class PCRDataModel:
                     rows.append({
                         'Cycle': cycles[i],
                         'Well': well_name,
-                        'Channel': channel_name,
+                        'Channel': channel_name,  # 使用用户选择的通道名，而不是actual_channel
                         'Value': values[i]
                     })
         
@@ -150,11 +159,33 @@ class PCRDataModel:
             cycles = well.cycles if well.cycles else list(range(1, 43))  # 默认42个循环
             
             for channel_name in target_channels:
+                # 处理HEX和VIC的等价关系
+                actual_channel = channel_name
+                if channel_name not in well.raw_channels and channel_name not in well.channels:
+                    # 如果选择HEX但找不到HEX数据，尝试查找VIC数据
+                    if channel_name == 'HEX':
+                        if 'VIC' in well.raw_channels:
+                            actual_channel = 'VIC'
+                        elif 'VIC' in well.channels:
+                            actual_channel = 'VIC'
+                        else:
+                            continue
+                    # 如果选择VIC但找不到VIC数据，尝试查找HEX数据
+                    elif channel_name == 'VIC':
+                        if 'HEX' in well.raw_channels:
+                            actual_channel = 'HEX'
+                        elif 'HEX' in well.channels:
+                            actual_channel = 'HEX'
+                        else:
+                            continue
+                    else:
+                        continue
+                
                 # 优先使用raw_channels，如果没有则使用channels
-                if channel_name in well.raw_channels:
-                    values = well.raw_channels[channel_name]
-                elif channel_name in well.channels:
-                    values = well.channels[channel_name]
+                if actual_channel in well.raw_channels:
+                    values = well.raw_channels[actual_channel]
+                elif actual_channel in well.channels:
+                    values = well.channels[actual_channel]
                 else:
                     continue
                 
@@ -167,7 +198,7 @@ class PCRDataModel:
                     rows.append({
                         'Cycle': cycles[i],
                         'Well': well_name,
-                        'Channel': channel_name,
+                        'Channel': channel_name,  # 使用用户选择的通道名，而不是actual_channel
                         'RawValue': values[i]
                     })
         
